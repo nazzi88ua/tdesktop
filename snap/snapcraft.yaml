@@ -1,0 +1,227 @@
+name: telegram-desktop
+adopt-info: telegram
+icon: Telegram/Resources/art/icon512@2x.png
+
+base: core18
+grade: stable
+confinement: strict
+
+apps:
+  telegram-desktop:
+    command: bin/desktop-launch telegram-desktop
+    common-id: org.telegram.desktop
+    desktop: share/applications/telegramdesktop.desktop
+    environment:
+      # Use GTK3 cursor theme, icon theme and open/save file dialogs.
+      QT_QPA_PLATFORMTHEME: gtk3
+      # Wayland support is still too bad.
+      DISABLE_WAYLAND: 1
+    plugs:
+      - desktop
+      - desktop-legacy
+      - home
+      - network
+      - network-manager
+      - pulseaudio
+      - removable-media
+      - unity7
+      - x11
+
+plugs:
+  # Support for common GTK themes
+  # https://forum.snapcraft.io/t/how-to-use-the-system-gtk-theme-via-the-gtk-common-themes-snap/6235
+  gsettings:
+  gtk-3-themes:
+    interface: content
+    target: $SNAP/data-dir/themes
+    default-provider: gtk-common-themes
+  icon-themes:
+    interface: content
+    target: $SNAP/data-dir/icons
+    default-provider: gtk-common-themes
+  sound-themes:
+    interface: content
+    target: $SNAP/data-dir/sounds
+    default-provider: gtk-common-themes
+
+parts:
+  telegram:
+    plugin: cmake
+    source: .
+    source-type: git
+    parse-info: [share/metainfo/telegramdesktop.appdata.xml]
+    build-packages:
+      - gcc-8
+      - g++-8
+      - qtbase5-private-dev
+      - libmapbox-variant-dev
+      - libasound2-dev
+      - libavcodec-dev
+      - libavformat-dev
+      - libavutil-dev
+      - libswscale-dev
+      - libswresample-dev
+      - libdbusmenu-qt5-dev
+      - liblz4-dev
+      - liblzma-dev
+      - libminizip-dev
+      - libopenal-dev
+      - libopus-dev
+      - libpulse-dev
+      - libssl-dev
+      - zlib1g-dev
+    stage-packages:
+      - qt5-image-formats-plugins
+      - libasound2
+      - libavcodec57
+      - libavformat57
+      - libavutil55
+      - libswscale4
+      - libswresample2
+      - libdbusmenu-qt5-2
+      - liblz4-1
+      - liblzma5
+      - libminizip1
+      - libopenal1
+      - libopus0
+      - libpulse0
+      - libssl1.1
+      - zlib1g
+    configflags:
+      - -DCMAKE_C_COMPILER=gcc-8
+      - -DCMAKE_CXX_COMPILER=g++-8
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DTDESKTOP_API_ID=611335
+      - -DTDESKTOP_API_HASH=d524b414d21f4d37f08684c1df41ac9c
+      - -DDESKTOP_APP_USE_PACKAGED_FONTS=OFF
+      - -DDESKTOP_APP_USE_PACKAGED_GSL=OFF
+      - -DDESKTOP_APP_USE_PACKAGED_EXPECTED=OFF
+      - -DDESKTOP_APP_USE_PACKAGED_RLOTTIE=OFF
+      - -DTDESKTOP_USE_PACKAGED_TGVOIP=OFF
+    override-pull: |
+      snapcraftctl pull
+
+      version_file=Telegram/build/version
+      version=$(sed -n "s/AppVersionStr[ ]\+\(.*\)\+/\1/p" $version_file)
+      beta=$(sed -n "s/BetaChannel[ ]\+\(.*\)\+/\1/p" $version_file)
+
+      if [ "$beta" != "0" ]; then
+        version="$version-beta"
+      fi
+
+      version="${version}$(git describe --tags | sed 's,^v[^-]\+,,')"
+
+      snapcraftctl set-version "$version"
+
+      sed -i 's|^Icon=.*|Icon=/share/icons/hicolor/512x512/apps/telegram.png|g' lib/xdg/telegramdesktop.desktop
+    after:
+      - cmake
+      - desktop-qt5
+      - enchant
+      - range-v3
+      - xxhash
+
+  spellchecking:
+    plugin: nil
+    stage-packages:
+      - hunspell-de-de
+      - hunspell-en-au
+      - hunspell-en-ca
+      - hunspell-en-gb
+      - hunspell-en-us
+      - hunspell-en-za
+      - hunspell-fr-classical
+      - hunspell-it
+      - hunspell-pl
+      - hunspell-es
+      - hunspell-pt-br
+      - hunspell-pt-pt
+
+  desktop-qt5:
+    source: https://github.com/ubuntu/snapcraft-desktop-helpers.git
+    source-subdir: qt
+    plugin: make
+    make-parameters: ["FLAVOR=qt5"]
+    build-packages:
+      - build-essential
+      - qtbase5-dev
+      - dpkg-dev
+    stage-packages:
+      - libxkbcommon0
+      - ttf-ubuntu-font-family
+      - dmz-cursor-theme
+      - light-themes
+      - adwaita-icon-theme
+      - gnome-themes-standard
+      - shared-mime-info
+      - libqt5gui5
+      - libgdk-pixbuf2.0-0
+      - libqt5svg5 # for loading icon themes which are svg
+      - try: [appmenu-qt5] # not available on core18
+      - locales-all
+      - xdg-user-dirs
+      - fcitx-frontend-qt5
+
+  qt5-gtk-platform:
+    plugin: nil
+    stage-packages:
+      - qt5-gtk-platformtheme
+
+  cmake:
+    source: "https://gitlab.kitware.com/cmake/cmake.git"
+    source-depth: 1
+    source-branch: master
+    source-type: git
+    plugin: make
+    override-build: |
+      ${SNAPCRAFT_PART_SRC}/bootstrap \
+        --parallel=${SNAPCRAFT_PARALLEL_BUILD_COUNT} \
+        -- \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/ \
+        -DBUILD_TESTING=OFF
+      snapcraftctl build
+    build-packages:
+      - build-essential
+      - libssl-dev
+      - libncurses5-dev
+    stage-packages:
+      - libssl1.1
+      - libncurses5
+      - libtinfo5
+    prime: [-./*]
+
+  enchant:
+    source: https://github.com/AbiWord/enchant.git
+    source-depth: 1
+    source-tag: v2.2.7
+    plugin: autotools
+    build-packages:
+      - libltdl-dev
+      - libglib2.0-dev
+      - libhunspell-dev
+    stage-packages:
+      - libglib2.0-0
+      - libhunspell-1.6-0
+    configflags:
+      - --enable-relocatable
+    prime: [-./bin/*]
+
+  range-v3:
+    source: https://github.com/ericniebler/range-v3.git
+    source-depth: 1
+    source-tag: 0.10.0
+    plugin: cmake
+    configflags:
+      - -DRANGE_V3_TESTS=OFF
+      - -DRANGE_V3_EXAMPLES=OFF
+      - -DRANGE_V3_DOCS=OFF
+    prime: [-./*]
+
+  xxhash:
+    source: https://github.com/Cyan4973/xxHash.git
+    source-depth: 1
+    source-tag: v0.7.2
+    plugin: make
+    make-parameters: [PREFIX=]
+    prime: [-./bin/*]

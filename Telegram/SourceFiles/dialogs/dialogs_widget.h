@@ -1,35 +1,27 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "dialogs/dialogs_key.h"
 #include "window/section_widget.h"
+#include "ui/effects/animations.h"
 #include "ui/widgets/scroll_area.h"
+#include "ui/special_buttons.h"
+#include "api/api_single_message_search.h"
+#include "mtproto/mtproto_rpc_sender.h"
 
-class DialogsInner;
+namespace Main {
+class Session;
+} // namespace Main
 
-namespace Dialogs {
-class Row;
-class FakeRow;
-class IndexedList;
-} // namespace Dialogs
+namespace HistoryView {
+class TopBarWidget;
+} // namespace HistoryView
 
 namespace Ui {
 class IconButton;
@@ -39,39 +31,42 @@ class FlatButton;
 class FlatInput;
 class CrossButton;
 template <typename Widget>
-class WidgetScaledFadeWrap;
+class FadeWrapScaled;
 } // namespace Ui
 
 namespace Window {
-class Controller;
+class SessionController;
+class ConnectionState;
 } // namespace Window
 
-enum DialogsSearchRequestType {
-	DialogsSearchFromStart,
-	DialogsSearchFromOffset,
-	DialogsSearchPeerFromStart,
-	DialogsSearchPeerFromOffset,
-	DialogsSearchMigratedFromStart,
-	DialogsSearchMigratedFromOffset,
-};
+namespace Dialogs {
 
-class DialogsWidget : public Window::AbstractSectionWidget, public RPCSender {
+enum class Mode;
+struct RowDescriptor;
+class Row;
+class FakeRow;
+class Key;
+struct ChosenRow;
+class InnerWidget;
+enum class SearchRequestType;
+
+class Widget : public Window::AbstractSectionWidget, public RPCSender {
 	Q_OBJECT
 
 public:
-	DialogsWidget(QWidget *parent, not_null<Window::Controller*> controller);
+	Widget(QWidget *parent, not_null<Window::SessionController*> controller);
 
 	void updateDragInScroll(bool inScroll);
 
-	void searchInPeer(PeerData *peer);
+	void searchInChat(Key chat);
+	void setInnerFocus();
 
-	void loadDialogs();
-	void loadPinnedDialogs();
-	void createDialog(History *history);
-	void dlgUpdated(Dialogs::Mode list, Dialogs::Row *row);
-	void dlgUpdated(PeerData *peer, MsgId msgId);
+	void refreshDialog(Key key);
+	void removeDialog(Key key);
+	void repaintDialogRow(Mode list, not_null<Row*> row);
+	void repaintDialogRow(RowDescriptor row);
 
-	void dialogsToUp();
+	void jumpToTop();
 
 	void startWidthAnimation();
 	void stopWidthAnimation();
@@ -82,27 +77,18 @@ public:
 	void showAnimated(Window::SlideDirection direction, const Window::SectionSlideParams &params);
 	void showFast();
 
-	void destroyData();
+	void scrollToEntry(const RowDescriptor &entry);
 
-	void peerBefore(const PeerData *inPeer, MsgId inMsg, PeerData *&outPeer, MsgId &outMsg) const;
-	void peerAfter(const PeerData *inPeer, MsgId inMsg, PeerData *&outPeer, MsgId &outMsg) const;
-	void scrollToPeer(const PeerId &peer, MsgId msgId);
-
-	void removeDialog(History *history);
-
-	Dialogs::IndexedList *contactsList();
-	Dialogs::IndexedList *dialogsList();
-	Dialogs::IndexedList *contactsNoDialogsList();
-
-	void searchMessages(const QString &query, PeerData *inPeer = 0);
+	void searchMessages(const QString &query, Key inChat = {});
 	void onSearchMore();
 
 	// Float player interface.
-	bool wheelEventFromFloatPlayer(QEvent *e, Window::Column myColumn, Window::Column playerColumn) override;
-	QRect rectForFloatPlayer(Window::Column myColumn, Window::Column playerColumn) override;
+	bool wheelEventFromFloatPlayer(QEvent *e) override;
+	QRect rectForFloatPlayer() const override;
 
-	void notify_userIsContactChanged(UserData *user, bool fromThisApp);
 	void notify_historyMuteUpdated(History *history);
+
+	~Widget();
 
 signals:
 	void cancelled();
@@ -110,12 +96,9 @@ signals:
 public slots:
 	void onDraggingScrollDelta(int delta);
 
-	void onCancel();
 	void onListScroll();
-	void activate();
-	void onFilterUpdate(bool force = false);
 	bool onCancelSearch();
-	void onCancelSearchInPeer();
+	void onCancelSearchInChat();
 
 	void onFilterCursorMoved(int from = -1, int to = -1);
 	void onCompleteHashtag(QString tag);
@@ -129,10 +112,6 @@ public slots:
 private slots:
 	void onDraggingScrollTimer();
 
-#ifndef TDESKTOP_DISABLE_AUTOUPDATE
-	void onCheckUpdateStatus();
-#endif // TDESKTOP_DISABLE_AUTOUPDATE
-
 protected:
 	void dragEnterEvent(QDragEnterEvent *e) override;
 	void dragMoveEvent(QDragMoveEvent *e) override;
@@ -143,60 +122,89 @@ protected:
 	void paintEvent(QPaintEvent *e) override;
 
 private:
-	void animationCallback();
-	void dialogsReceived(const MTPmessages_Dialogs &dialogs, mtpRequestId requestId);
-	void pinnedDialogsReceived(const MTPmessages_PeerDialogs &dialogs, mtpRequestId requestId);
-	void contactsReceived(const MTPcontacts_Contacts &result);
-	void searchReceived(DialogsSearchRequestType type, const MTPmessages_Messages &result, mtpRequestId requestId);
-	void peerSearchReceived(const MTPcontacts_Found &result, mtpRequestId requestId);
+	enum class ShowAnimation {
+		External,
+		Internal,
+	};
 
-	void setSearchInPeer(PeerData *peer, UserData *from = nullptr);
+	void animationCallback();
+	void searchReceived(
+		SearchRequestType type,
+		const MTPmessages_Messages &result,
+		mtpRequestId requestId);
+	void peerSearchReceived(
+		const MTPcontacts_Found &result,
+		mtpRequestId requestId);
+	void escape();
+
+	void setupSupportMode();
+	void setupConnectingWidget();
+	bool searchForPeersRequired(const QString &query) const;
+	void setSearchInChat(Key chat, UserData *from = nullptr);
+	void showJumpToDate();
 	void showSearchFrom();
 	void showMainMenu();
 	void clearSearchCache();
+	void updateControlsVisibility(bool fast = false);
 	void updateLockUnlockVisibility();
+	void updateLoadMoreChatsVisibility();
 	void updateJumpToDateVisibility(bool fast = false);
 	void updateSearchFromVisibility(bool fast = false);
 	void updateControlsGeometry();
+	void refreshFolderTopBar();
 	void updateForwardBar();
+	void checkUpdateStatus();
+	void changeOpenedFolder(Data::Folder *folder, anim::type animated);
+	QPixmap grabForFolderSlideAnimation();
+	void startSlideAnimation();
 
-	void unreadCountsReceived(const QVector<MTPDialog> &dialogs);
-	bool dialogsFailed(const RPCError &error, mtpRequestId req);
-	bool contactsFailed(const RPCError &error);
-	bool searchFailed(DialogsSearchRequestType type, const RPCError &error, mtpRequestId req);
+	void fullSearchRefreshOn(rpl::producer<> events);
+	void applyFilterUpdate(bool force = false);
+	void refreshLoadMoreButton(bool mayBlock, bool isBlocked);
+	void loadMoreBlockedByDate();
+
+	bool searchFailed(SearchRequestType type, const RPCError &error, mtpRequestId req);
 	bool peopleFailed(const RPCError &error, mtpRequestId req);
+
+	void scrollToTop();
+	void setupScrollUpButton();
+	void updateScrollUpVisibility();
+	void startScrollUpButtonAnimation(bool shown);
+	void updateScrollUpPosition();
 
 	bool _dragInScroll = false;
 	bool _dragForward = false;
 	QTimer _chooseByDragTimer;
 
-	bool _dialogsFull = false;
-	int32 _dialogsOffsetDate = 0;
-	MsgId _dialogsOffsetId = 0;
-	PeerData *_dialogsOffsetPeer = nullptr;
-	mtpRequestId _dialogsRequestId = 0;
-	mtpRequestId _pinnedDialogsRequestId = 0;
-	mtpRequestId _contactsRequestId = 0;
-	bool _pinnedDialogsReceived = false;
-
 	object_ptr<Ui::IconButton> _forwardCancel = { nullptr };
+	object_ptr<Ui::RpWidget> _searchControls;
+	object_ptr<HistoryView::TopBarWidget> _folderTopBar = { nullptr } ;
 	object_ptr<Ui::IconButton> _mainMenuToggle;
 	object_ptr<Ui::FlatInput> _filter;
-	object_ptr<Ui::WidgetScaledFadeWrap<Ui::IconButton>> _chooseFromUser;
-	object_ptr<Ui::WidgetScaledFadeWrap<Ui::IconButton>> _jumpToDate;
+	object_ptr<Ui::FadeWrapScaled<Ui::IconButton>> _chooseFromUser;
+	object_ptr<Ui::FadeWrapScaled<Ui::IconButton>> _jumpToDate;
 	object_ptr<Ui::CrossButton> _cancelSearch;
 	object_ptr<Ui::IconButton> _lockUnlock;
 	object_ptr<Ui::ScrollArea> _scroll;
-	QPointer<DialogsInner> _inner;
-	class UpdateButton;
-	object_ptr<UpdateButton> _updateTelegram = { nullptr };
+	QPointer<InnerWidget> _inner;
+	class BottomButton;
+	object_ptr<BottomButton> _updateTelegram = { nullptr };
+	object_ptr<BottomButton> _loadMoreChats = { nullptr };
+	std::unique_ptr<Window::ConnectionState> _connecting;
 
-	Animation _a_show;
-	Window::SlideDirection _showDirection;
+	Ui::Animations::Simple _scrollToAnimation;
+	Ui::Animations::Simple _a_show;
+	Window::SlideDirection _showDirection = Window::SlideDirection();
 	QPixmap _cacheUnder, _cacheOver;
+	ShowAnimation _showAnimationType = ShowAnimation::External;
 
-	PeerData *_searchInPeer = nullptr;
-	PeerData *_searchInMigrated = nullptr;
+	Ui::Animations::Simple _scrollToTopShown;
+	bool _scrollToTopIsShown = false;
+	object_ptr<Ui::HistoryDownButton> _scrollToTop;
+
+	Data::Folder *_openedFolder = nullptr;
+	Key _searchInChat;
+	History *_searchInMigrated = nullptr;
 	UserData *_searchFromUser = nullptr;
 	QString _lastFilterText;
 
@@ -208,21 +216,16 @@ private:
 
 	QString _searchQuery;
 	UserData *_searchQueryFrom = nullptr;
+	int32 _searchNextRate = 0;
 	bool _searchFull = false;
 	bool _searchFullMigrated = false;
 	mtpRequestId _searchRequest = 0;
 
-	using SearchCache = QMap<QString, MTPmessages_Messages>;
-	SearchCache _searchCache;
-
-	using SearchQueries = QMap<mtpRequestId, QString>;
-	SearchQueries _searchQueries;
-
-	using PeerSearchCache = QMap<QString, MTPcontacts_Found>;
-	PeerSearchCache _peerSearchCache;
-
-	using PeerSearchQueries = QMap<mtpRequestId, QString>;
-	PeerSearchQueries _peerSearchQueries;
+	QMap<QString, MTPmessages_Messages> _searchCache;
+	Api::SingleMessageSearch _singleMessageSearch;
+	QMap<mtpRequestId, QString> _searchQueries;
+	QMap<QString, MTPcontacts_Found> _peerSearchCache;
+	QMap<mtpRequestId, QString> _peerSearchQueries;
 
 	QPixmap _widthAnimationCache;
 
@@ -230,3 +233,5 @@ private:
 	int _draggingScrollDelta = 0;
 
 };
+
+} // namespace Dialogs

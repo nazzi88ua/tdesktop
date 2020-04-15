@@ -1,31 +1,18 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "base/variant.h"
+#include "mtproto/mtproto_rpc_sender.h"
+#include "mtproto/mtp_instance.h"
+#include "mtproto/facade.h"
 
 namespace MTP {
-
-class Instance;
-Instance *MainInstance();
 
 class Sender {
 	class RequestBuilder {
@@ -35,8 +22,8 @@ class Sender {
 		RequestBuilder &operator=(RequestBuilder &&other) = delete;
 
 	protected:
-		using FailPlainHandler = base::lambda_once<void(const RPCError &error)>;
-		using FailRequestIdHandler = base::lambda_once<void(const RPCError &error, mtpRequestId requestId)>;
+		using FailPlainHandler = FnMut<void(const RPCError &error)>;
+		using FailRequestIdHandler = FnMut<void(const RPCError &error, mtpRequestId requestId)>;
 		enum class FailSkipPolicy {
 			Simple,
 			HandleFlood,
@@ -44,7 +31,7 @@ class Sender {
 		};
 		template <typename Response>
 		struct DonePlainPolicy {
-			using Callback = base::lambda_once<void(const Response &result)>;
+			using Callback = FnMut<void(const Response &result)>;
 			static void handle(Callback &&handler, mtpRequestId requestId, Response &&result) {
 				handler(result);
 			}
@@ -52,7 +39,7 @@ class Sender {
 		};
 		template <typename Response>
 		struct DoneRequestIdPolicy {
-			using Callback = base::lambda_once<void(const Response &result, mtpRequestId requestId)>;
+			using Callback = FnMut<void(const Response &result, mtpRequestId requestId)>;
 			static void handle(Callback &&handler, mtpRequestId requestId, Response &&result) {
 				handler(result, requestId);
 			}
@@ -67,15 +54,18 @@ class Sender {
 			DoneHandler(not_null<Sender*> sender, Callback handler) : _sender(sender), _handler(std::move(handler)) {
 			}
 
-			void operator()(mtpRequestId requestId, const mtpPrime *from, const mtpPrime *end) override {
+			bool operator()(mtpRequestId requestId, const mtpPrime *from, const mtpPrime *end) override {
 				auto handler = std::move(_handler);
 				_sender->senderRequestHandled(requestId);
 
+				auto result = Response();
+				if (!result.read(from, end)) {
+					return false;
+				}
 				if (handler) {
-					auto result = Response();
-					result.read(from, end);
 					Policy::handle(std::move(handler), requestId, std::move(result));
 				}
+				return true;
 			}
 
 		private:
@@ -85,14 +75,14 @@ class Sender {
 		};
 
 		struct FailPlainPolicy {
-			using Callback = base::lambda_once<void(const RPCError &error)>;
+			using Callback = FnMut<void(const RPCError &error)>;
 			static void handle(Callback &&handler, mtpRequestId requestId, const RPCError &error) {
 				handler(error);
 			}
 
 		};
 		struct FailRequestIdPolicy {
-			using Callback = base::lambda_once<void(const RPCError &error, mtpRequestId requestId)>;
+			using Callback = FnMut<void(const RPCError &error, mtpRequestId requestId)>;
 			static void handle(Callback &&handler, mtpRequestId requestId, const RPCError &error) {
 				handler(error, requestId);
 			}
@@ -111,11 +101,11 @@ class Sender {
 
 			bool operator()(mtpRequestId requestId, const RPCError &error) override {
 				if (_skipPolicy == FailSkipPolicy::Simple) {
-					if (MTP::isDefaultHandledError(error)) {
+					if (isDefaultHandledError(error)) {
 						return false;
 					}
 				} else if (_skipPolicy == FailSkipPolicy::HandleFlood) {
-					if (MTP::isDefaultHandledError(error) && !MTP::isFloodError(error)) {
+					if (isDefaultHandledError(error) && !isFloodError(error)) {
 						return false;
 					}
 				}
@@ -143,7 +133,7 @@ class Sender {
 		void setToDC(ShiftedDcId dcId) noexcept {
 			_dcId = dcId;
 		}
-		void setCanWait(TimeMs ms) noexcept {
+		void setCanWait(crl::time ms) noexcept {
 			_canWait = ms;
 		}
 		void setDoneHandler(RPCDoneHandlerPtr &&handler) noexcept {
@@ -165,7 +155,7 @@ class Sender {
 		ShiftedDcId takeDcId() const noexcept {
 			return _dcId;
 		}
-		TimeMs takeCanWait() const noexcept {
+		crl::time takeCanWait() const noexcept {
 			return _canWait;
 		}
 		RPCDoneHandlerPtr takeOnDone() noexcept {
@@ -173,9 +163,9 @@ class Sender {
 		}
 		RPCFailHandlerPtr takeOnFail() {
 			if (auto handler = base::get_if<FailPlainHandler>(&_fail)) {
-				return MakeShared<FailHandler<FailPlainPolicy>>(_sender, std::move(*handler), _failSkipPolicy);
+				return std::make_shared<FailHandler<FailPlainPolicy>>(_sender, std::move(*handler), _failSkipPolicy);
 			} else if (auto handler = base::get_if<FailRequestIdHandler>(&_fail)) {
-				return MakeShared<FailHandler<FailRequestIdPolicy>>(_sender, std::move(*handler), _failSkipPolicy);
+				return std::make_shared<FailHandler<FailRequestIdPolicy>>(_sender, std::move(*handler), _failSkipPolicy);
 			}
 			return RPCFailHandlerPtr();
 		}
@@ -193,7 +183,7 @@ class Sender {
 	private:
 		not_null<Sender*> _sender;
 		ShiftedDcId _dcId = 0;
-		TimeMs _canWait = 0;
+		crl::time _canWait = 0;
 		RPCDoneHandlerPtr _done;
 		base::variant<FailPlainHandler, FailRequestIdHandler> _fail;
 		FailSkipPolicy _failSkipPolicy = FailSkipPolicy::Simple;
@@ -202,7 +192,12 @@ class Sender {
 	};
 
 public:
-	Sender() noexcept {
+	explicit Sender(not_null<Instance*> instance) noexcept
+	: _instance(instance) {
+	}
+
+	[[nodiscard]] not_null<Instance*> instance() const {
+		return _instance;
 	}
 
 	template <typename Request>
@@ -214,45 +209,51 @@ public:
 		SpecificRequestBuilder(SpecificRequestBuilder &&other) = default;
 
 	public:
-		SpecificRequestBuilder &toDC(ShiftedDcId dcId) noexcept WARN_UNUSED_RESULT {
+		[[nodiscard]] SpecificRequestBuilder &toDC(ShiftedDcId dcId) noexcept {
 			setToDC(dcId);
 			return *this;
 		}
-		SpecificRequestBuilder &canWait(TimeMs ms) noexcept WARN_UNUSED_RESULT {
+		[[nodiscard]] SpecificRequestBuilder &afterDelay(crl::time ms) noexcept {
 			setCanWait(ms);
 			return *this;
 		}
-		SpecificRequestBuilder &done(base::lambda_once<void(const typename Request::ResponseType &result)> callback) WARN_UNUSED_RESULT {
-			setDoneHandler(MakeShared<DoneHandler<typename Request::ResponseType, DonePlainPolicy>>(sender(), std::move(callback)));
+		[[nodiscard]] SpecificRequestBuilder &done(FnMut<void(const typename Request::ResponseType &result)> callback) {
+			setDoneHandler(std::make_shared<DoneHandler<typename Request::ResponseType, DonePlainPolicy>>(sender(), std::move(callback)));
 			return *this;
 		}
-		SpecificRequestBuilder &done(base::lambda_once<void(const typename Request::ResponseType &result, mtpRequestId requestId)> callback) WARN_UNUSED_RESULT {
-			setDoneHandler(MakeShared<DoneHandler<typename Request::ResponseType, DoneRequestIdPolicy>>(sender(), std::move(callback)));
+		[[nodiscard]] SpecificRequestBuilder &done(FnMut<void(const typename Request::ResponseType &result, mtpRequestId requestId)> callback) {
+			setDoneHandler(std::make_shared<DoneHandler<typename Request::ResponseType, DoneRequestIdPolicy>>(sender(), std::move(callback)));
 			return *this;
 		}
-		SpecificRequestBuilder &fail(base::lambda_once<void(const RPCError &error)> callback) noexcept WARN_UNUSED_RESULT {
+		[[nodiscard]] SpecificRequestBuilder &fail(FnMut<void(const RPCError &error)> callback) noexcept {
 			setFailHandler(std::move(callback));
 			return *this;
 		}
-		SpecificRequestBuilder &fail(base::lambda_once<void(const RPCError &error, mtpRequestId requestId)> callback) noexcept WARN_UNUSED_RESULT {
+		[[nodiscard]] SpecificRequestBuilder &fail(FnMut<void(const RPCError &error, mtpRequestId requestId)> callback) noexcept {
 			setFailHandler(std::move(callback));
 			return *this;
 		}
-		SpecificRequestBuilder &handleFloodErrors() noexcept WARN_UNUSED_RESULT {
+		[[nodiscard]] SpecificRequestBuilder &handleFloodErrors() noexcept {
 			setFailSkipPolicy(FailSkipPolicy::HandleFlood);
 			return *this;
 		}
-		SpecificRequestBuilder &handleAllErrors() noexcept WARN_UNUSED_RESULT {
+		[[nodiscard]] SpecificRequestBuilder &handleAllErrors() noexcept {
 			setFailSkipPolicy(FailSkipPolicy::HandleAll);
 			return *this;
 		}
-		SpecificRequestBuilder &after(mtpRequestId requestId) noexcept WARN_UNUSED_RESULT {
+		[[nodiscard]] SpecificRequestBuilder &afterRequest(mtpRequestId requestId) noexcept {
 			setAfter(requestId);
 			return *this;
 		}
 
 		mtpRequestId send() {
-			auto id = MainInstance()->send(_request, takeOnDone(), takeOnFail(), takeDcId(), takeCanWait(), takeAfter());
+			const auto id = sender()->instance()->send(
+				_request,
+				takeOnDone(),
+				takeOnFail(),
+				takeDcId(),
+				takeCanWait(),
+				takeAfter());
 			registerRequest(id);
 			return id;
 		}
@@ -279,33 +280,48 @@ public:
 
 	};
 
-	template <typename Request, typename = std::enable_if_t<std::is_rvalue_reference<Request&&>::value>, typename = typename Request::Unboxed>
-	SpecificRequestBuilder<Request> request(Request &&request) noexcept WARN_UNUSED_RESULT;
+	template <
+		typename Request,
+		typename = std::enable_if_t<!std::is_reference_v<Request>>,
+		typename = typename Request::Unboxed>
+	[[nodiscard]] SpecificRequestBuilder<Request> request(Request &&request) noexcept;
 
-	SentRequestWrap request(mtpRequestId requestId) noexcept WARN_UNUSED_RESULT;
+	[[nodiscard]] SentRequestWrap request(mtpRequestId requestId) noexcept;
 
-	decltype(auto) requestCanceller() noexcept WARN_UNUSED_RESULT {
+	[[nodiscard]] auto requestCanceller() noexcept {
 		return [this](mtpRequestId requestId) {
 			request(requestId).cancel();
 		};
 	}
 
 	void requestSendDelayed() {
-		MainInstance()->sendAnything();
+		_instance->sendAnything();
 	}
 	void requestCancellingDiscard() {
 		for (auto &request : _requests) {
 			request.handled();
 		}
 	}
-	not_null<Instance*> requestMTP() const {
-		return MainInstance();
-	}
 
 private:
 	class RequestWrap {
 	public:
-		RequestWrap(Instance *instance, mtpRequestId requestId) noexcept : _id(requestId) {
+		RequestWrap(
+			Instance *instance,
+			mtpRequestId requestId) noexcept
+		: _id(requestId) {
+		}
+
+		RequestWrap(const RequestWrap &other) = delete;
+		RequestWrap &operator=(const RequestWrap &other) = delete;
+		RequestWrap(RequestWrap &&other) : _id(base::take(other._id)) {
+		}
+		RequestWrap &operator=(RequestWrap &&other) {
+			if (_id != other._id) {
+				cancelRequest();
+				_id = base::take(other._id);
+			}
+			return *this;
 		}
 
 		mtpRequestId id() const noexcept {
@@ -315,12 +331,17 @@ private:
 		}
 
 		~RequestWrap() {
-			if (auto instance = MainInstance()) {
-				instance->cancel(_id);
-			}
+			cancelRequest();
 		}
 
 	private:
+		void cancelRequest() {
+			if (_id) {
+				if (auto instance = MainInstance()) {
+					instance->cancel(_id);
+				}
+			}
+		}
 		mtpRequestId _id = 0;
 
 	};
@@ -370,7 +391,8 @@ private:
 		}
 	}
 
-	std::set<RequestWrap, RequestWrapComparator> _requests; // Better to use flatmap.
+	const not_null<Instance*> _instance;
+	base::flat_set<RequestWrap, RequestWrapComparator> _requests;
 
 };
 

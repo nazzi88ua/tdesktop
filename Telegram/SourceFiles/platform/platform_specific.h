@@ -1,22 +1,9 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
@@ -25,15 +12,34 @@ namespace Platform {
 void start();
 void finish();
 
-void SetWatchingMediaKeys(bool watching);
-bool TranslucentWindowsSupported(QPoint globalPosition);
-void StartTranslucentPaint(QPainter &p, QPaintEvent *e);
-void InitOnTopPanel(QWidget *panel);
-void DeInitOnTopPanel(QWidget *panel);
-void ReInitOnTopPanel(QWidget *panel);
+enum class PermissionStatus {
+	Granted,
+	CanRequest,
+	Denied,
+};
 
-QString SystemLanguage();
-QString SystemCountry();
+enum class PermissionType {
+	Microphone,
+};
+
+enum class SystemSettingsType {
+	Audio,
+};
+
+void SetWatchingMediaKeys(bool watching);
+void SetApplicationIcon(const QIcon &icon);
+void RegisterCustomScheme();
+PermissionStatus GetPermissionStatus(PermissionType type);
+void RequestPermission(PermissionType type, Fn<void(PermissionStatus)> resultCallback);
+void OpenSystemSettingsForPermission(PermissionType type);
+bool OpenSystemSettings(SystemSettingsType type);
+
+[[nodiscard]] std::optional<crl::time> LastUserInputTime();
+[[nodiscard]] inline bool LastUserInputTimeSupported() {
+	return LastUserInputTime().has_value();
+}
+
+void IgnoreApplicationActivationRightNow();
 
 namespace ThirdParty {
 

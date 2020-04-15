@@ -1,26 +1,20 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "platform/platform_main_window.h"
+
+#include "ui/widgets/popup_menu.h"
+
+#ifndef TDESKTOP_DISABLE_DBUS_INTEGRATION
+#include "statusnotifieritem.h"
+#include <QtCore/QTemporaryFile>
+#endif
 
 namespace Platform {
 
@@ -28,16 +22,16 @@ class MainWindow : public Window::MainWindow {
 	Q_OBJECT
 
 public:
-	MainWindow();
+	explicit MainWindow(not_null<Window::Controller*> controller);
 
 	void psFirstShow();
-	void psInitSysMenu();
-	void psUpdateMargins();
 
-	void psRefreshTaskbarIcon() {
-	}
-
-	virtual QImage iconWithCounter(int size, int count, style::color bg, style::color fg, bool smallIcon) = 0;
+	virtual QImage iconWithCounter(
+		int size,
+		int count,
+		style::color bg,
+		style::color fg,
+		bool smallIcon) = 0;
 
 	static void LibsLoaded();
 
@@ -45,9 +39,6 @@ public:
 
 public slots:
 	void psShowTrayMenu();
-
-	void psStatusIconCheck();
-	void psUpdateIndicator();
 
 protected:
 	void unreadCounterChangedHook() override;
@@ -62,17 +53,26 @@ protected:
 	void psTrayMenuUpdated();
 	void psSetupTrayIcon();
 
-	virtual void placeSmallCounter(QImage &img, int size, int count, style::color bg, const QPoint &shift, style::color color) = 0;
+	virtual void placeSmallCounter(
+		QImage &img,
+		int size,
+		int count,
+		style::color bg,
+		const QPoint &shift,
+		style::color color) = 0;
 
 private:
+	Ui::PopupMenu *_trayIconMenuXEmbed = nullptr;
+
 	void updateIconCounters();
-	void psCreateTrayIcon();
 
-	QTimer _psCheckStatusIconTimer;
-	int _psCheckStatusIconLeft = 100;
+#ifndef TDESKTOP_DISABLE_DBUS_INTEGRATION
+	StatusNotifierItem *_sniTrayIcon = nullptr;
+	std::unique_ptr<QTemporaryFile> _trayIconFile = nullptr;
 
-	QTimer _psUpdateIndicatorTimer;
-	TimeMs _psLastIndicatorUpdate = 0;
+	void setSNITrayIcon(const QIcon &icon, const QImage &iconImage);
+	void attachToSNITrayIcon();
+#endif // !TDESKTOP_DISABLE_DBUS_INTEGRATION
 
 };
 

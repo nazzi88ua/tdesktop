@@ -1,22 +1,9 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "lang/lang_file_parser.h"
 
@@ -29,13 +16,13 @@ constexpr auto kLangFileLimit = 1024 * 1024;
 
 } // namespace
 
-FileParser::FileParser(const QString &file, const std::set<LangKey> &request)
+FileParser::FileParser(const QString &file, const std::set<ushort> &request)
 : _content(base::parse::stripComments(ReadFile(file, file)))
 , _request(request) {
 	parse();
 }
 
-FileParser::FileParser(const QByteArray &content, base::lambda<void(QLatin1String key, const QByteArray &value)> callback)
+FileParser::FileParser(const QByteArray &content, Fn<void(QLatin1String key, const QByteArray &value)> callback)
 : _content(base::parse::stripComments(content))
 , _callback(std::move(callback)) {
 	parse();
@@ -103,7 +90,7 @@ bool FileParser::readKeyValue(const char *&from, const char *end) {
 	}
 
 	auto skipping = false;
-	auto keyIndex = kLangKeysCount;
+	auto keyIndex = kKeysCount;
 	if (!_callback) {
 		keyIndex = GetKeyIndex(key);
 		skipping = (_request.find(keyIndex) == _request.end());

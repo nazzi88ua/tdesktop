@@ -1,25 +1,16 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include <rpl/producer.h>
+#include <rpl/filter.h>
+#include <rpl/then.h>
+#include <rpl/range.h>
 #include "base/observer.h"
 #include "base/flags.h"
 
@@ -43,37 +34,41 @@ struct PeerUpdate {
 		PhotoChanged              = (1 << 2),
 		AboutChanged              = (1 << 3),
 		NotificationsEnabled      = (1 << 4),
-		SharedMediaChanged        = (1 << 5),
 		MigrationChanged          = (1 << 6),
-		PinnedChanged             = (1 << 7),
-		RestrictionReasonChanged  = (1 << 8),
+		ChatPinnedChanged         = (1 << 7),
+		UnavailableReasonChanged  = (1 << 8),
+		UnreadViewChanged         = (1 << 9),
+		PinnedMessageChanged      = (1 << 10),
 
 		// For chats and channels
-		InviteLinkChanged         = (1 << 9),
-		MembersChanged            = (1 << 10),
-		AdminsChanged             = (1 << 11),
-		BannedUsersChanged        = (1 << 12),
-		UnreadMentionsChanged     = (1 << 13),
+		InviteLinkChanged         = (1 << 11),
+		MembersChanged            = (1 << 12),
+		AdminsChanged             = (1 << 13),
+		BannedUsersChanged        = (1 << 14),
+		UnreadMentionsChanged     = (1 << 15),
+		RightsChanged             = (1 << 16),
 
 		// For users
-		UserCanShareContact       = (1 << 16),
-		UserIsContact             = (1 << 17),
-		UserPhoneChanged          = (1 << 18),
-		UserIsBlocked             = (1 << 19),
-		BotCommandsChanged        = (1 << 20),
-		UserOnlineChanged         = (1 << 21),
-		BotCanAddToGroups         = (1 << 22),
-		UserCommonChatsChanged    = (1 << 23),
-		UserHasCalls              = (1 << 24),
-
-		// For chats
-		ChatCanEdit               = (1 << 16),
+		UserCanShareContact       = (1 << 17),
+		UserIsContact             = (1 << 18),
+		UserPhoneChanged          = (1 << 19),
+		UserIsBlocked             = (1 << 20),
+		BotCommandsChanged        = (1 << 21),
+		UserOnlineChanged         = (1 << 22),
+		BotCanAddToGroups         = (1 << 23),
+		UserCommonChatsChanged    = (1 << 24),
+		UserHasCalls              = (1 << 25),
+		UserOccupiedChanged       = (1 << 26),
+		UserSupportInfoChanged    = (1 << 27),
 
 		// For channels
-		ChannelAmIn               = (1 << 16),
-		ChannelRightsChanged      = (1 << 17),
+		ChannelAmIn               = (1 << 17),
 		ChannelStickersChanged    = (1 << 18),
-		ChannelPinnedChanged      = (1 << 19),
+		ChannelPromotedChanged    = (1 << 19),
+		ChannelLinkedChat         = (1 << 20),
+		ChannelLocation           = (1 << 21),
+		ChannelSlowmode           = (1 << 22),
+		ChannelLocalMessages      = (1 << 23),
 	};
 	using Flags = base::flags<Flag>;
 	friend inline constexpr auto is_flag_type(Flag) { return true; }
@@ -81,11 +76,7 @@ struct PeerUpdate {
 	Flags flags = 0;
 
 	// NameChanged data
-	PeerData::Names oldNames;
-	PeerData::NameFirstChars oldNameFirstChars;
-
-	// SharedMediaChanged data
-	int32 mediaTypesMask = 0;
+	base::flat_set<QChar> oldNameFirstLetters;
 
 };
 
@@ -96,13 +87,6 @@ inline void peerUpdatedDelayed(PeerData *peer, PeerUpdate::Flags events) {
 	peerUpdatedDelayed(update);
 }
 void peerUpdatedSendDelayed();
-
-inline void mediaOverviewUpdated(PeerData *peer, MediaOverviewType type) {
-	PeerUpdate update(peer);
-	update.flags |= PeerUpdate::Flag::SharedMediaChanged;
-	update.mediaTypesMask |= (1 << type);
-	peerUpdatedDelayed(update);
-}
 
 class PeerUpdatedHandler {
 public:
@@ -117,9 +101,20 @@ public:
 
 private:
 	PeerUpdate::Flags _events;
-	base::lambda<void(const PeerUpdate&)> _handler;
+	Fn<void(const PeerUpdate&)> _handler;
 
 };
 base::Observable<PeerUpdate, PeerUpdatedHandler> &PeerUpdated();
+
+rpl::producer<PeerUpdate> PeerUpdateViewer(
+	PeerUpdate::Flags flags);
+
+rpl::producer<PeerUpdate> PeerUpdateViewer(
+	not_null<PeerData*> peer,
+	PeerUpdate::Flags flags);
+
+rpl::producer<PeerUpdate> PeerUpdateValue(
+	not_null<PeerData*> peer,
+	PeerUpdate::Flags flags);
 
 } // namespace Notify

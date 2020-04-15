@@ -1,31 +1,20 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "mtproto/config_loader.h"
 
+#include "mtproto/special_config_request.h"
+#include "mtproto/facade.h"
 #include "mtproto/dc_options.h"
 #include "mtproto/mtp_instance.h"
-#include "mtproto/special_config_request.h"
+#include "facades.h"
 
 namespace MTP {
-namespace internal {
+namespace details {
 namespace {
 
 constexpr auto kEnumerateDcTimeout = 8000; // 8 seconds timeout for help_getConfig to work (then move to other dc)
@@ -33,9 +22,15 @@ constexpr auto kSpecialRequestTimeoutMs = 6000; // 4 seconds timeout for it to w
 
 } // namespace
 
-ConfigLoader::ConfigLoader(not_null<Instance*> instance, RPCDoneHandlerPtr onDone, RPCFailHandlerPtr onFail) : _instance(instance)
-	, _doneHandler(onDone)
-	, _failHandler(onFail) {
+ConfigLoader::ConfigLoader(
+	not_null<Instance*> instance,
+	const QString &phone,
+	RPCDoneHandlerPtr onDone,
+	RPCFailHandlerPtr onFail)
+: _instance(instance)
+, _phone(phone)
+, _doneHandler(onDone)
+, _failHandler(onFail) {
 	_enumDCTimer.setCallback([this] { enumerate(); });
 	_specialEnumTimer.setCallback([this] { sendSpecialRequest(); });
 }
@@ -53,11 +48,15 @@ void ConfigLoader::load() {
 }
 
 mtpRequestId ConfigLoader::sendRequest(ShiftedDcId shiftedDcId) {
-	return _instance->send(MTPhelp_GetConfig(), _doneHandler, _failHandler, shiftedDcId);
+	return _instance->send(
+		MTPhelp_GetConfig(),
+		base::duplicate(_doneHandler),
+		base::duplicate(_failHandler),
+		shiftedDcId);
 }
 
 DcId ConfigLoader::specialToRealDcId(DcId specialDcId) {
-	return Instance::Config::kTemporaryMainDc + specialDcId;
+	return getTemporaryIdFromRealDcId(specialDcId);
 }
 
 void ConfigLoader::terminateRequest() {
@@ -101,24 +100,55 @@ void ConfigLoader::enumerate() {
 
 	_enumDCTimer.callOnce(kEnumerateDcTimeout);
 
-	createSpecialLoader();
+	refreshSpecialLoader();
 }
 
-void ConfigLoader::createSpecialLoader() {
-	if (Global::ConnectionType() != dbictAuto) {
+void ConfigLoader::refreshSpecialLoader() {
+	if (Global::ProxySettings() == ProxyData::Settings::Enabled) {
 		_specialLoader.reset();
 		return;
 	}
-	if (!_specialLoader || (!_specialEnumRequest && _specialEndpoints.empty())) {
-		_specialLoader = std::make_unique<SpecialConfigRequest>([this](DcId dcId, const std::string &ip, int port) {
-			addSpecialEndpoint(dcId, ip, port);
-		});
-		_triedSpecialEndpoints.clear();
+	if (!_specialLoader
+		|| (!_specialEnumRequest && _specialEndpoints.empty())) {
+		createSpecialLoader();
 	}
 }
 
-void ConfigLoader::addSpecialEndpoint(DcId dcId, const std::string &ip, int port) {
-	auto endpoint = SpecialEndpoint { dcId, ip, port };
+void ConfigLoader::setPhone(const QString &phone) {
+	if (_phone != phone) {
+		_phone = phone;
+		if (_specialLoader) {
+			createSpecialLoader();
+		}
+	}
+}
+
+void ConfigLoader::createSpecialLoader() {
+	_triedSpecialEndpoints.clear();
+	_specialLoader = std::make_unique<SpecialConfigRequest>([=](
+			DcId dcId,
+			const std::string &ip,
+			int port,
+			bytes::const_span secret) {
+		if (ip.empty()) {
+			_specialLoader = nullptr;
+		} else {
+			addSpecialEndpoint(dcId, ip, port, secret);
+		}
+	}, _phone);
+}
+
+void ConfigLoader::addSpecialEndpoint(
+		DcId dcId,
+		const std::string &ip,
+		int port,
+		bytes::const_span secret) {
+	const auto endpoint = SpecialEndpoint {
+		dcId,
+		ip,
+		port,
+		bytes::make_vector(secret)
+	};
 	if (base::contains(_specialEndpoints, endpoint)
 		|| base::contains(_triedSpecialEndpoints, endpoint)) {
 		return;
@@ -133,26 +163,38 @@ void ConfigLoader::addSpecialEndpoint(DcId dcId, const std::string &ip, int port
 
 void ConfigLoader::sendSpecialRequest() {
 	terminateSpecialRequest();
-	if (Global::ConnectionType() != dbictAuto) {
+	if (Global::ProxySettings() == ProxyData::Settings::Enabled) {
 		_specialLoader.reset();
 		return;
 	}
 	if (_specialEndpoints.empty()) {
-		createSpecialLoader();
+		refreshSpecialLoader();
 		return;
 	}
 
-	auto weak = base::make_weak_unique(this);
-	auto index = rand_value<uint32>() % uint32(_specialEndpoints.size());
-	auto endpoint = _specialEndpoints.begin() + index;
+	const auto weak = base::make_weak(this);
+	const auto index = rand_value<uint32>() % _specialEndpoints.size();
+	const auto endpoint = _specialEndpoints.begin() + index;
 	_specialEnumCurrent = specialToRealDcId(endpoint->dcId);
-	_instance->dcOptions()->constructAddOne(_specialEnumCurrent, MTPDdcOption::Flag::f_tcpo_only, endpoint->ip, endpoint->port);
-	_specialEnumRequest = _instance->send(MTPhelp_GetConfig(), rpcDone([weak](const MTPConfig &result) {
-		if (!weak) {
-			return;
-		}
-		weak->specialConfigLoaded(result);
-	}), _failHandler, _specialEnumCurrent);
+
+	using Flag = MTPDdcOption::Flag;
+	const auto flags = Flag::f_tcpo_only
+		| (endpoint->secret.empty() ? Flag(0) : Flag::f_secret);
+	_instance->dcOptions()->constructAddOne(
+		_specialEnumCurrent,
+		flags,
+		endpoint->ip,
+		endpoint->port,
+		endpoint->secret);
+	_specialEnumRequest = _instance->send(
+		MTPhelp_GetConfig(),
+		rpcDone([weak](const MTPConfig &result) {
+			if (const auto strong = weak.get()) {
+				strong->specialConfigLoaded(result);
+			}
+		}),
+		base::duplicate(_failHandler),
+		_specialEnumCurrent);
 	_triedSpecialEndpoints.push_back(*endpoint);
 	_specialEndpoints.erase(endpoint);
 
@@ -161,16 +203,17 @@ void ConfigLoader::sendSpecialRequest() {
 
 void ConfigLoader::specialConfigLoaded(const MTPConfig &result) {
 	Expects(result.type() == mtpc_config);
-	auto &data = result.c_config();
-	if (data.vdc_options.v.empty()) {
+
+	const auto &data = result.c_config();
+	if (data.vdc_options().v.empty()) {
 		LOG(("MTP Error: config with empty dc_options received!"));
 		return;
 	}
 
 	// We use special config only for dc options.
 	// For everything else we wait for normal config from main dc.
-	_instance->dcOptions()->setFromList(data.vdc_options);
+	_instance->dcOptions()->setFromList(data.vdc_options());
 }
 
-} // namespace internal
+} // namespace details
 } // namespace MTP

@@ -1,37 +1,26 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "layout.h"
-#include "structs.h"
 #include "ui/text/text.h"
 
 namespace InlineBots {
+
 class Result;
 
 namespace Layout {
 
+class ItemBase;
+
 class PaintContext : public PaintContextBase {
 public:
-	PaintContext(TimeMs ms, bool selecting, bool paused, bool lastRow)
+	PaintContext(crl::time ms, bool selecting, bool paused, bool lastRow)
 		: PaintContextBase(ms, selecting)
 		, paused(paused)
 		, lastRow(lastRow) {
@@ -43,7 +32,7 @@ public:
 // this type used as a flag, we dynamic_cast<> to it
 class SendClickHandler : public ClickHandler {
 public:
-	void onClick(Qt::MouseButton) const override {
+	void onClick(ClickContext context) const override {
 	}
 };
 
@@ -52,13 +41,18 @@ public:
 	virtual void inlineItemLayoutChanged(const ItemBase *layout) = 0;
 	virtual bool inlineItemVisible(const ItemBase *item) = 0;
 	virtual void inlineItemRepaint(const ItemBase *item) = 0;
+	virtual Data::FileOrigin inlineItemFileOrigin() = 0;
 };
 
 class ItemBase : public LayoutItemBase {
 public:
-	ItemBase(not_null<Context*> context, Result *result) : _result(result), _context(context) {
+	ItemBase(not_null<Context*> context, not_null<Result*> result)
+	: _result(result)
+	, _context(context) {
 	}
-	ItemBase(not_null<Context*> context, DocumentData *doc) : _doc(doc), _context(context) {
+	ItemBase(not_null<Context*> context, DocumentData *doc)
+	: _doc(doc)
+	, _context(context) {
 	}
 	// Not used anywhere currently.
 	//ItemBase(not_null<Context*> context, PhotoData *photo) : _photo(photo), _context(context) {
@@ -87,7 +81,7 @@ public:
 
 	virtual void preload() const;
 
-	void update();
+	void update() const;
 	void layoutChanged();
 
 	// ClickHandlerHost interface
@@ -104,17 +98,18 @@ public:
 protected:
 	DocumentData *getResultDocument() const;
 	PhotoData *getResultPhoto() const;
-	ImagePtr getResultThumb() const;
+	Image *getResultThumb() const;
 	QPixmap getResultContactAvatar(int width, int height) const;
 	int getResultDuration() const;
 	QString getResultUrl() const;
 	ClickHandlerPtr getResultUrlHandler() const;
-	ClickHandlerPtr getResultContentUrlHandler() const;
+	ClickHandlerPtr getResultPreviewHandler() const;
 	QString getResultThumbLetter() const;
 
 	not_null<Context*> context() const {
 		return _context;
 	}
+	Data::FileOrigin fileOrigin() const;
 
 	Result *_result = nullptr;
 	DocumentData *_doc = nullptr;
@@ -129,13 +124,19 @@ private:
 
 };
 
-using DocumentItems = QMap<DocumentData*, OrderedSet<ItemBase*>>;
+using DocumentItems = std::map<
+	not_null<const DocumentData*>,
+	base::flat_set<not_null<ItemBase*>>>;
 const DocumentItems *documentItems();
 
 namespace internal {
 
-void regDocumentItem(DocumentData *document, ItemBase *item);
-void unregDocumentItem(DocumentData *document, ItemBase *item);
+void regDocumentItem(
+	not_null<const DocumentData*> document,
+	not_null<ItemBase*> item);
+void unregDocumentItem(
+	not_null<const DocumentData*> document,
+	not_null<ItemBase*> item);
 
 } // namespace internal
 } // namespace Layout

@@ -1,22 +1,9 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include <cstdio>
 #include <sys/stat.h>
@@ -27,6 +14,7 @@ Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
 #include <pwd.h>
 #include <string>
 #include <deque>
+#include <vector>
 #include <cstring>
 #include <cerrno>
 #include <algorithm>
@@ -36,6 +24,7 @@ Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
 
 using std::string;
 using std::deque;
+using std::vector;
 using std::cout;
 
 bool do_mkdir(const char *path) { // from http://stackoverflow.com/questions/675039/how-can-i-create-directory-tree-in-c-linux
@@ -344,9 +333,17 @@ string CurrentExecutablePath(int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
-	bool needupdate = true, autostart = false, debug = false, tosettings = false, startintray = false, testmode = false;
+	bool needupdate = true;
+	bool autostart = false;
+	bool debug = false;
+	bool tosettings = false;
+	bool startintray = false;
+	bool testmode = false;
+	bool externalupdater = false;
+	bool customWorkingDir = false;
 
-	char *key = 0, *crashreport = 0;
+	char *key = 0;
+	char *workdir = 0;
 	for (int i = 1; i < argc; ++i) {
 		if (equal(argv[i], "-noupdate")) {
 			needupdate = false;
@@ -358,14 +355,16 @@ int main(int argc, char *argv[]) {
 			startintray = true;
 		} else if (equal(argv[i], "-testmode")) {
 			testmode = true;
+		} else if (equal(argv[i], "-externalupdater")) {
+			externalupdater = true;
 		} else if (equal(argv[i], "-tosettings")) {
 			tosettings = true;
+		} else if (equal(argv[i], "-workdir_custom")) {
+			customWorkingDir = true;
 		} else if (equal(argv[i], "-key") && ++i < argc) {
 			key = argv[i];
 		} else if (equal(argv[i], "-workpath") && ++i < argc) {
-			workDir = argv[i];
-		} else if (equal(argv[i], "-crashreport") && ++i < argc) {
-			crashreport = argv[i];
+			workDir = workdir = argv[i];
 		} else if (equal(argv[i], "-exename") && ++i < argc) {
 			exeName = argv[i];
 		} else if (equal(argv[i], "-exepath") && ++i < argc) {
@@ -377,7 +376,7 @@ int main(int argc, char *argv[]) {
 	}
 	openLog();
 
-	writeLog("Updater started..");
+	writeLog("Updater started, new argments formatting..");
 	for (int i = 0; i < argc; ++i) {
 		writeLog("Argument: '%s'", argv[i]);
 	}
@@ -401,6 +400,8 @@ int main(int argc, char *argv[]) {
 			}
 			if (needupdate) {
 				if (workDir.empty()) { // old app launched, update prepared in tupdates/ready (not in tupdates/temp)
+					customWorkingDir = false;
+
 					writeLog("No workdir, trying to figure it out");
 					struct passwd *pw = getpwuid(getuid());
 					if (pw && pw->pw_dir && strlen(pw->pw_dir)) {
@@ -440,33 +441,45 @@ int main(int argc, char *argv[]) {
 		writeLog("Error: short exe name!");
 	}
 
-	static const int MaxLen = 65536, MaxArgsCount = 128;
+	auto fullBinaryPath = exePath + exeName;
+	const auto path = fullBinaryPath.c_str();
 
-	char path[MaxLen] = {0};
-	string fullBinaryPath = exePath + exeName;
-	strcpy(path, fullBinaryPath.c_str());
-
-	char *args[MaxArgsCount] = {0}, p_noupdate[] = "-noupdate", p_autostart[] = "-autostart", p_debug[] = "-debug", p_tosettings[] = "-tosettings", p_key[] = "-key", p_startintray[] = "-startintray", p_testmode[] = "-testmode";
-	int argIndex = 0;
-	args[argIndex++] = path;
-	if (crashreport) {
-		args[argIndex++] = crashreport;
-	} else {
-		args[argIndex++] = p_noupdate;
-		if (autostart) args[argIndex++] = p_autostart;
-		if (debug) args[argIndex++] = p_debug;
-		if (startintray) args[argIndex++] = p_startintray;
-		if (testmode) args[argIndex++] = p_testmode;
-		if (tosettings) args[argIndex++] = p_tosettings;
-		if (key) {
-			args[argIndex++] = p_key;
-			args[argIndex++] = key;
-		}
+	auto values = vector<string>();
+	const auto push = [&](string arg) {
+		// Force null-terminated .data() call result.
+		values.push_back(arg + char(0));
+	};
+	push(path);
+	push("-noupdate");
+	if (autostart) push("-autostart");
+	if (debug) push("-debug");
+	if (startintray) push("-startintray");
+	if (testmode) push("-testmode");
+	if (externalupdater) push("-externalupdater");
+	if (tosettings) push("-tosettings");
+	if (key) {
+		push("-key");
+		push(key);
 	}
+	if (customWorkingDir && workdir) {
+		push("-workdir");
+		push(workdir);
+	}
+
+	auto args = vector<char*>();
+	for (auto &arg : values) {
+		args.push_back(arg.data());
+	}
+	args.push_back(nullptr);
+
 	pid_t pid = fork();
 	switch (pid) {
-	case -1: writeLog("fork() failed!"); return 1;
-	case 0: execv(path, args); return 1;
+	case -1:
+		writeLog("fork() failed!");
+		return 1;
+	case 0:
+		execv(path, args.data());
+		return 1;
 	}
 
 	writeLog("Executed Telegram, closing log and quitting..");

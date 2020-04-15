@@ -1,28 +1,18 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "boxes/abstract_box.h"
 #include "base/timer.h"
 #include "mtproto/sender.h"
+#include "chat_helpers/stickers.h"
+#include "ui/effects/animations.h"
+#include "ui/special_fields.h"
 
 class ConfirmBox;
 
@@ -35,21 +25,35 @@ class PlainShadow;
 class RippleAnimation;
 class SettingsSlider;
 class SlideAnimation;
-class UsernameInput;
 class CrossButton;
+class BoxContentDivider;
 } // namespace Ui
 
-class StickersBox : public BoxContent, public RPCSender {
+namespace Main {
+class Session;
+} // namespace Main
+
+class StickersBox final
+	: public Ui::BoxContent
+	, public RPCSender
+	, private base::Subscriber {
 public:
 	enum class Section {
 		Installed,
 		Featured,
 		Archived,
-		ArchivedPart,
+		Attached,
 	};
-	StickersBox(QWidget*, Section section);
-	StickersBox(QWidget*, const Stickers::Order &archivedIds);
+
+	StickersBox(
+		QWidget*,
+		not_null<Main::Session*> session,
+		Section section);
 	StickersBox(QWidget*, not_null<ChannelData*> megagroup);
+	StickersBox(
+		QWidget*,
+		not_null<Main::Session*> session,
+		const MTPVector<MTPStickerSetCovered> &attachedSets);
 
 	void setInnerFocus() override;
 
@@ -111,6 +115,9 @@ private:
 	void requestArchivedSets();
 	void loadMoreArchived();
 	void getArchivedDone(uint64 offsetId, const MTPmessages_ArchivedStickers &result);
+	void showAttachedStickers();
+
+	const not_null<Main::Session*> _session;
 
 	object_ptr<Ui::SettingsSlider> _tabs = { nullptr };
 	QList<Section> _tabIndices;
@@ -123,16 +130,15 @@ private:
 	Tab _installed;
 	Tab _featured;
 	Tab _archived;
+	Tab _attached;
 	Tab *_tab = nullptr;
+
+	const MTPVector<MTPStickerSetCovered> _attachedSets;
 
 	ChannelData *_megagroupSet = nullptr;
 
 	std::unique_ptr<Ui::SlideAnimation> _slideAnimation;
-	object_ptr<BoxLayerTitleShadow> _titleShadow = { nullptr };
-
-	int _aboutWidth = 0;
-	Text _about;
-	int _aboutHeight = 0;
+	object_ptr<Ui::PlainShadow> _titleShadow = { nullptr };
 
 	mtpRequestId _archivedRequestId = 0;
 	bool _archivedLoaded = false;
@@ -144,16 +150,19 @@ private:
 
 };
 
-int stickerPacksCount(bool includeArchivedOfficial = false);
-
 // This class is hold in header because it requires Qt preprocessing.
-class StickersBox::Inner : public TWidget, private base::Subscriber, private MTP::Sender {
+class StickersBox::Inner
+	: public Ui::RpWidget
+	, private base::Subscriber {
 	Q_OBJECT
 
 public:
 	using Section = StickersBox::Section;
-	Inner(QWidget *parent, Section section);
-	Inner(QWidget *parent, const Stickers::Order &archivedIds);
+
+	Inner(
+		QWidget *parent,
+		not_null<Main::Session*> session,
+		Section section);
 	Inner(QWidget *parent, not_null<ChannelData*> megagroup);
 
 	base::Observable<int> scrollToY;
@@ -173,14 +182,13 @@ public:
 	void setFullOrder(const Stickers::Order &order);
 	void setRemovedSets(const Stickers::Order &removed);
 
-	void setInstallSetCallback(base::lambda<void(uint64 setId)> callback) {
+	void setInstallSetCallback(Fn<void(uint64 setId)> callback) {
 		_installSetCallback = std::move(callback);
 	}
-	void setLoadMoreCallback(base::lambda<void()> callback) {
+	void setLoadMoreCallback(Fn<void()> callback) {
 		_loadMoreCallback = std::move(callback);
 	}
 
-	void setVisibleTopBottom(int visibleTop, int visibleBottom) override;
 	void setMinHeight(int newWidth, int minHeight);
 
 	int getVisibleTop() const {
@@ -190,6 +198,10 @@ public:
 	~Inner();
 
 protected:
+	void visibleTopBottomUpdated(
+		int visibleTop,
+		int visibleBottom) override;
+
 	void paintEvent(QPaintEvent *e) override;
 	void resizeEvent(QResizeEvent *e) override;
 	void mousePressEvent(QMouseEvent *e) override;
@@ -206,13 +218,29 @@ public slots:
 
 private:
 	struct Row {
-		Row(uint64 id, DocumentData *sticker, int32 count, const QString &title, int titleWidth, bool installed, bool official, bool unread, bool archived, bool removed, int32 pixw, int32 pixh);
+		Row(
+			uint64 id,
+			uint64 accessHash,
+			ImagePtr thumbnail,
+			DocumentData *sticker,
+			int32 count,
+			const QString &title,
+			int titleWidth,
+			bool installed,
+			bool official,
+			bool unread,
+			bool archived,
+			bool removed,
+			int32 pixw,
+			int32 pixh);
 		bool isRecentSet() const {
 			return (id == Stickers::CloudRecentSetId);
 		}
 		~Row();
 
 		uint64 id = 0;
+		uint64 accessHash = 0;
+		ImagePtr thumbnail;
 		DocumentData *sticker = nullptr;
 		int32 count = 0;
 		QString title;
@@ -226,6 +254,28 @@ private:
 		int32 pixh = 0;
 		anim::value yadd;
 		std::unique_ptr<Ui::RippleAnimation> ripple;
+		std::unique_ptr<Lottie::SinglePlayer> lottie;
+	};
+	struct MegagroupSet {
+		inline bool operator==(const MegagroupSet &other) const {
+			return true;
+		}
+		inline bool operator!=(const MegagroupSet &other) const {
+			return false;
+		}
+	};
+	using SelectedRow = base::optional_variant<MegagroupSet, int>;
+	class AddressField : public Ui::UsernameInput {
+	public:
+		using UsernameInput::UsernameInput;
+
+	protected:
+		void correctValue(
+			const QString &was,
+			int wasCursor,
+			QString &now,
+			int &nowCursor) override;
+
 	};
 
 	template <typename Check>
@@ -236,47 +286,53 @@ private:
 	int getRowIndex(uint64 setId) const;
 	void setRowRemoved(int index, bool removed);
 
-	void setSelected(int selected);
+	void setSelected(SelectedRow selected);
 	void setActionDown(int newActionDown);
-	void setPressed(int pressed);
+	void setPressed(SelectedRow pressed);
 	void setup();
 	QRect relativeButtonRect(bool removeButton) const;
 	void ensureRipple(const style::RippleAnimation &st, QImage mask, bool removeButton);
 
-	void step_shifting(TimeMs ms, bool timer);
-	void paintRow(Painter &p, Row *set, int index, TimeMs ms);
-	void paintFakeButton(Painter &p, Row *set, int index, TimeMs ms);
+	bool shiftingAnimationCallback(crl::time now);
+	void paintRow(Painter &p, not_null<Row*> set, int index);
+	void paintRowThumbnail(Painter &p, not_null<Row*> set, int left);
+	void paintFakeButton(Painter &p, not_null<Row*> set, int index);
 	void clear();
 	void setActionSel(int32 actionSel);
 	float64 aboveShadowOpacity() const;
+	void validateLottieAnimation(not_null<Row*> set);
+	void updateRowThumbnail(not_null<Row*> set);
 
 	void readVisibleSets();
 
 	void updateControlsGeometry();
 	void rebuildAppendSet(const Stickers::Set &set, int maxNameWidth);
-	void fillSetCover(const Stickers::Set &set, DocumentData **outSticker, int *outWidth, int *outHeight) const;
+	void fillSetCover(const Stickers::Set &set, ImagePtr *thumbnail, DocumentData **outSticker, int *outWidth, int *outHeight) const;
 	int fillSetCount(const Stickers::Set &set) const;
 	QString fillSetTitle(const Stickers::Set &set, int maxNameWidth, int *outTitleWidth) const;
 	void fillSetFlags(const Stickers::Set &set, bool *outInstalled, bool *outOfficial, bool *outUnread, bool *outArchived);
 	void rebuildMegagroupSet();
+	void fixupMegagroupSetAddress();
 	void handleMegagroupSetAddressChange();
 	void setMegagroupSelectedSet(const MTPInputStickerSet &set);
 
 	int countMaxNameWidth() const;
 
+	const not_null<Main::Session*> _session;
+	MTP::Sender _api;
+
 	Section _section;
-	Stickers::Order _archivedIds;
 
 	int32 _rowHeight;
 
 	std::vector<std::unique_ptr<Row>> _rows;
-	QList<TimeMs> _animStartTimes;
-	TimeMs _aboveShadowFadeStart = 0;
+	std::vector<crl::time> _shiftingStartTimes;
+	crl::time _aboveShadowFadeStart = 0;
 	anim::value _aboveShadowFadeOpacity;
-	BasicAnimation _a_shifting;
+	Ui::Animations::Basic _shiftingAnimation;
 
-	base::lambda<void(uint64 setId)> _installSetCallback;
-	base::lambda<void()> _loadMoreCallback;
+	Fn<void(uint64 setId)> _installSetCallback;
+	Fn<void()> _loadMoreCallback;
 
 	int _visibleTop = 0;
 	int _visibleBottom = 0;
@@ -294,8 +350,8 @@ private:
 
 	QPoint _mouse;
 	bool _inDragArea = false;
-	int _selected = -1;
-	int _pressed = -1;
+	SelectedRow _selected;
+	SelectedRow _pressed;
 	QPoint _dragStart;
 	int _started = -1;
 	int _dragging = -1;
@@ -307,10 +363,10 @@ private:
 	ChannelData *_megagroupSet = nullptr;
 	MTPInputStickerSet _megagroupSetInput = MTP_inputStickerSetEmpty();
 	std::unique_ptr<Row> _megagroupSelectedSet;
-	object_ptr<Ui::UsernameInput> _megagroupSetField = { nullptr };
-	object_ptr<BoxLayerTitleShadow> _megagroupSelectedShadow = { nullptr };
+	object_ptr<AddressField> _megagroupSetField = { nullptr };
+	object_ptr<Ui::PlainShadow> _megagroupSelectedShadow = { nullptr };
 	object_ptr<Ui::CrossButton> _megagroupSelectedRemove = { nullptr };
-	object_ptr<BoxContentDivider> _megagroupDivider = { nullptr };
+	object_ptr<Ui::BoxContentDivider> _megagroupDivider = { nullptr };
 	object_ptr<Ui::FlatLabel> _megagroupSubTitle = { nullptr };
 	base::Timer _megagroupSetAddressChangedTimer;
 	mtpRequestId _megagroupSetRequestId = 0;
