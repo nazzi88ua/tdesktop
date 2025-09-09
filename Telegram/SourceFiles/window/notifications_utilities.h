@@ -1,63 +1,49 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "window/notifications_manager.h"
-#include "core/single_timer.h"
+#include "base/timer.h"
 
-namespace Window {
-namespace Notifications {
+namespace Ui {
+struct PeerUserpicView;
+} // namespace Ui
+
+namespace Window::Notifications {
+
+[[nodiscard]] QImage GenerateUserpic(
+	not_null<PeerData*> peer,
+	Ui::PeerUserpicView &view);
 
 class CachedUserpics : public QObject {
-	Q_OBJECT
-
 public:
-	enum class Type {
-		Rounded,
-		Circled,
-	};
-	CachedUserpics(Type type);
-
-	QString get(const StorageKey &key, PeerData *peer);
-
+	CachedUserpics();
 	~CachedUserpics();
 
-private slots:
-	void onClear();
+	[[nodiscard]] QString get(
+		const InMemoryKey &key,
+		not_null<PeerData*> peer,
+		Ui::PeerUserpicView &view);
 
 private:
+	void clear();
 	void clearInMs(int ms);
-	TimeMs clear(TimeMs ms);
+	crl::time clear(crl::time ms);
 
-	Type _type = Type::Rounded;
 	struct Image {
-		TimeMs until;
+		crl::time until = 0;
 		QString path;
 	};
-	using Images = QMap<StorageKey, Image>;
+	using Images = QMap<InMemoryKey, Image>;
 	Images _images;
 	bool _someSavedFlag = false;
-	SingleTimer _clearTimer;
+	base::Timer _clearTimer;
 
 };
 
-} // namesapce Notifications
-} // namespace Window
+} // namespace Window::Notifications

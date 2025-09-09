@@ -1,110 +1,116 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "ui/effects/panel_animation.h"
+#include "ui/effects/animations.h"
+#include "ui/rp_widget.h"
+#include "base/unique_qptr.h"
+#include "base/timer.h"
+
+#include <QtWidgets/QTextEdit>
+
+namespace style {
+struct EmojiSuggestions;
+} // namespace style
+
+namespace Main {
+class Session;
+} // namespace Main
 
 namespace Ui {
-
 class InnerDropdown;
-class FlatTextarea;
+class InputField;
+} // namespace Ui
 
-namespace Emoji {
+namespace Ui::Text {
+class CustomEmoji;
+} // namespace Ui::Text
 
-class SuggestionsWidget : public TWidget {
+namespace Ui::Emoji {
+
+class SuggestionsWidget;
+
+using SuggestionsQuery = std::variant<QString, EmojiPtr>;
+
+class SuggestionsController final : public QObject {
 public:
-	SuggestionsWidget(QWidget *parent, const style::Menu &st);
+	struct Options {
+		bool suggestExactFirstWord = true;
+		bool suggestCustomEmoji = false;
+		Fn<bool(not_null<DocumentData*>)> allowCustomWithoutPremium;
+		const style::EmojiSuggestions *st = nullptr;
+	};
 
-	void showWithQuery(const QString &query);
-	void handleKeyEvent(int key);
-
-	base::Observable<bool> toggleAnimated;
-	base::Observable<QString> triggered;
-
-protected:
-	void paintEvent(QPaintEvent *e) override;
-	void keyPressEvent(QKeyEvent *e) override;
-	void mouseMoveEvent(QMouseEvent *e) override;
-	void mousePressEvent(QMouseEvent *e) override;
-	void mouseReleaseEvent(QMouseEvent *e) override;
-	void enterEventHook(QEvent *e) override;
-	void leaveEventHook(QEvent *e) override;
-
-private:
-	class Row;
-
-	std::vector<Row> getRowsByQuery() const;
-	void resizeToRows();
-	int countWidth(const Row &row);
-	void setSelected(int selected);
-	void setPressed(int pressed);
-	void clearMouseSelection();
-	void clearSelection();
-	void updateSelectedItem();
-	int itemTop(int index);
-	void updateItem(int index);
-	void updateSelection(QPoint globalPosition);
-	void triggerSelectedRow();
-	void triggerRow(const Row &row);
-
-	not_null<const style::Menu*> _st;
-
-	QString _query;
-	std::vector<Row> _rows;
-
-	int _rowHeight = 0;
-	bool _mouseSelection = false;
-	int _selected = -1;
-	int _pressed = -1;
-
-};
-
-class SuggestionsController : public QObject, private base::Subscriber {
-public:
-	SuggestionsController(QWidget *parent, not_null<QTextEdit*> field);
+	SuggestionsController(
+		not_null<QWidget*> parent,
+		not_null<QWidget*> outer,
+		not_null<QTextEdit*> field,
+		not_null<Main::Session*> session,
+		const Options &options);
 
 	void raise();
+	void setReplaceCallback(Fn<void(
+		int from,
+		int till,
+		const QString &replacement,
+		const QString &customEmojiData)> callback);
 
-protected:
-	bool eventFilter(QObject *object, QEvent *event) override;
+	static not_null<SuggestionsController*> Init(
+			not_null<QWidget*> outer,
+			not_null<Ui::InputField*> field,
+			not_null<Main::Session*> session) {
+		return Init(outer, field, session, {});
+	}
+	static not_null<SuggestionsController*> Init(
+		not_null<QWidget*> outer,
+		not_null<Ui::InputField*> field,
+		not_null<Main::Session*> session,
+		const Options &options);
 
 private:
 	void handleCursorPositionChange();
 	void handleTextChange();
-	QString getEmojiQuery();
+	void showWithQuery(SuggestionsQuery query);
+	[[nodiscard]] SuggestionsQuery getEmojiQuery();
 	void suggestionsUpdated(bool visible);
 	void updateGeometry();
 	void updateForceHidden();
-	void replaceCurrent(const QString &replacement);
+	void replaceCurrent(
+		const QString &replacement,
+		const QString &customEmojiData);
+	bool fieldFilter(not_null<QEvent*> event);
+	bool outerFilter(not_null<QEvent*> event);
 
+	const style::EmojiSuggestions &_st;
 	bool _shown = false;
 	bool _forceHidden = false;
 	int _queryStartPosition = 0;
+	int _emojiQueryLength = 0;
 	bool _ignoreCursorPositionChange = false;
 	bool _textChangeAfterKeyPress = false;
 	QPointer<QTextEdit> _field;
-	object_ptr<InnerDropdown> _container;
+	const not_null<Main::Session*> _session;
+	Fn<void(
+		int from,
+		int till,
+		const QString &replacement,
+		const QString &customEmojiData)> _replaceCallback;
+	base::unique_qptr<InnerDropdown> _container;
 	QPointer<SuggestionsWidget> _suggestions;
+	base::unique_qptr<QObject> _fieldFilter;
+	base::unique_qptr<QObject> _outerFilter;
+	base::Timer _showExactTimer;
+	bool _keywordsRefreshed = false;
+	SuggestionsQuery _lastShownQuery;
+	Options _options;
+
+	rpl::lifetime _lifetime;
 
 };
 
-} // namespace Emoji
-} // namespace Ui
+} // namespace Ui::Emoji

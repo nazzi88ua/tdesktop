@@ -1,37 +1,48 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include <windows.h>
+#include <wtypes.h>
 
 namespace Platform {
 namespace AppUserModelId {
 
-void cleanupShortcut();
-void checkPinned();
+void CleanupShortcut();
+void CheckPinned();
 
-const WCHAR *getId();
-bool validateShortcut();
+[[nodiscard]] const std::wstring &Id();
+bool ValidateShortcut();
 
-const PROPERTYKEY &getKey();
+[[nodiscard]] const PROPERTYKEY &Key();
+
+[[nodiscard]] const std::wstring &MyExecutablePath();
+
+struct UniqueFileId {
+	std::uint64_t part1 = 0;
+	std::uint64_t part2 = 0;
+
+	[[nodiscard]] bool valid() const {
+		return part1 || part2;
+	}
+	[[nodiscard]] explicit operator bool() const {
+		return valid();
+	}
+
+	[[nodiscard]] friend inline auto operator<=>(
+		UniqueFileId a,
+		UniqueFileId b) = default;
+	[[nodiscard]] friend inline bool operator==(
+		UniqueFileId a,
+		UniqueFileId b) = default;
+};
+
+[[nodiscard]] UniqueFileId GetUniqueFileId(LPCWSTR path);
+[[nodiscard]] UniqueFileId MyExecutablePathId();
 
 } // namespace AppUserModelId
 } // namespace Platform

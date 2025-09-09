@@ -1,186 +1,603 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "window/window_controller.h"
 
-#include "window/main_window.h"
-#include "mainwidget.h"
-#include "styles/style_window.h"
-#include "styles/style_dialogs.h"
-#include "boxes/calendar_box.h"
-#include "auth_session.h"
-#include "apiwrap.h"
+#include "api/api_updates.h"
+#include "core/application.h"
+#include "core/click_handler_types.h"
+#include "export/export_manager.h"
+#include "ui/platform/ui_platform_window.h"
+#include "platform/platform_window_title.h"
+#include "main/main_account.h"
+#include "main/main_domain.h"
+#include "main/main_session.h"
+#include "main/main_session_settings.h"
+#include "main/main_app_config.h"
+#include "media/view/media_view_open_common.h"
+#include "lang/lang_keys.h"
+#include "intro/intro_widget.h"
+#include "mtproto/mtproto_config.h"
+#include "ui/toast/toast.h"
+#include "ui/emoji_config.h"
+#include "chat_helpers/emoji_sets_manager.h"
+#include "window/window_session_controller.h"
+#include "window/themes/window_theme_editor.h"
+#include "ui/boxes/confirm_box.h"
+#include "data/data_thread.h"
+#include "apiwrap.h" // ApiWrap::acceptTerms.
+#include "styles/style_layers.h"
+
+#include <QtGui/QWindow>
+#include <QtGui/QScreen>
 
 namespace Window {
+namespace {
 
-void Controller::enableGifPauseReason(GifPauseReason reason) {
-	if (!(_gifPauseReasons & reason)) {
-		auto notify = (static_cast<int>(_gifPauseReasons) < static_cast<int>(reason));
-		_gifPauseReasons |= reason;
-		if (notify) {
-			_gifPauseLevelChanged.notify();
-		}
+class Show final : public Ui::Show {
+public:
+	explicit Show(not_null<Controller*> window);
+
+	void showOrHideBoxOrLayer(
+		std::variant<
+			v::null_t,
+			object_ptr<Ui::BoxContent>,
+			std::unique_ptr<Ui::LayerWidget>> &&layer,
+		Ui::LayerOptions options,
+		anim::type animated) const override;
+	[[nodiscard]] not_null<QWidget*> toastParent() const override;
+	[[nodiscard]] bool valid() const override;
+	operator bool() const override;
+
+private:
+	const base::weak_ptr<Controller> _window;
+
+};
+
+Show::Show(not_null<Controller*> window)
+: _window(base::make_weak(window)) {
+}
+
+void Show::showOrHideBoxOrLayer(
+		std::variant<
+			v::null_t,
+			object_ptr<Ui::BoxContent>,
+			std::unique_ptr<Ui::LayerWidget>> &&layer,
+		Ui::LayerOptions options,
+		anim::type animated) const {
+	if (const auto window = _window.get()) {
+		window->widget()->showOrHideBoxOrLayer(
+			std::move(layer),
+			options,
+			animated);
 	}
 }
 
-void Controller::disableGifPauseReason(GifPauseReason reason) {
-	if (_gifPauseReasons & reason) {
-		_gifPauseReasons &= ~reason;
-		if (_gifPauseReasons < reason) {
-			_gifPauseLevelChanged.notify();
-		}
+not_null<QWidget*> Show::toastParent() const {
+	const auto window = _window.get();
+	Assert(window != nullptr);
+	return window->widget()->bodyWidget();
+}
+
+bool Show::valid() const {
+	return !_window.empty();
+}
+
+Show::operator bool() const {
+	return valid();
+}
+
+} // namespace
+
+Controller::Controller() : Controller(CreateArgs{ nullptr }) {
+}
+
+Controller::Controller(SeparateId id, MsgId showAtMsgId)
+: Controller(CreateArgs{ id }) {
+	if (id) {
+		showAccount(id.account, showAtMsgId);
 	}
 }
 
-bool Controller::isGifPausedAtLeastFor(GifPauseReason reason) const {
-	if (reason == GifPauseReason::Any) {
-		return (_gifPauseReasons != 0) || !window()->isActive();
-	}
-	return (static_cast<int>(_gifPauseReasons) >= 2 * static_cast<int>(reason)) || !window()->isActive();
+Controller::Controller(CreateArgs &&args)
+: _id(args.id)
+, _isActiveTimer([=] { updateIsActive(); })
+, _widget(this)
+, _adaptive(std::make_unique<Adaptive>()) {
+	_widget.init();
 }
 
-int Controller::dialogsSmallColumnWidth() const {
-	return st::dialogsPadding.x() + st::dialogsPhotoSize + st::dialogsPadding.x();
+Controller::~Controller() {
+	// We want to delete all widgets before the _sessionController.
+	_widget.ui_hideSettingsAndLayer(anim::type::instant);
+	_widget.clearWidgets();
+	_accountLifetime.destroy();
+	_sessionControllerValue = nullptr;
+	_sessionController = nullptr;
 }
 
-Controller::ColumnLayout Controller::computeColumnLayout() const {
-	auto layout = Adaptive::WindowLayout::OneColumn;
+SeparateId Controller::id() const {
+	return _id;
+}
 
-	auto bodyWidth = window()->bodyWidget()->width();
-	auto dialogsWidth = qRound(bodyWidth * dialogsWidthRatio().value());
-	auto chatWidth = bodyWidth - dialogsWidth;
-	accumulate_max(chatWidth, st::windowMinWidth);
-	dialogsWidth = bodyWidth - chatWidth;
+bool Controller::isPrimary() const {
+	return _id.primary();
+}
 
-	auto useOneColumnLayout = [this, bodyWidth, dialogsWidth] {
-		auto someSectionShown = !App::main()->selectingPeer() && App::main()->isSectionShown();
-		if (dialogsWidth < st::dialogsPadding.x() && (Adaptive::OneColumn() || someSectionShown)) {
-			return true;
+Main::Account &Controller::account() const {
+	Expects(_id.account != nullptr);
+
+	return *_id.account;
+}
+
+void Controller::showAccount(not_null<Main::Account*> account) {
+	showAccount(account, ShowAtUnreadMsgId);
+}
+
+void Controller::showAccount(
+		not_null<Main::Account*> account,
+		MsgId singlePeerShowAtMsgId) {
+	Expects(isPrimary() || _id.account == account);
+
+	const auto prevSession = maybeSession();
+	const auto prevSessionUniqueId = prevSession
+		? prevSession->uniqueId()
+		: 0;
+	_accountLifetime.destroy();
+	_id.account = account;
+	Core::App().checkWindowId(this);
+
+	const auto updateOnlineOfPrevSesssion = crl::guard(account, [=] {
+		if (!prevSessionUniqueId) {
+			return;
 		}
-		if (bodyWidth < st::windowMinWidth + st::dialogsWidthMin) {
-			return true;
-		}
-		return false;
-	};
-
-	auto useSmallColumnLayout = [this, dialogsWidth] {
-		// Used if useOneColumnLayout() == false.
-		if (dialogsWidth < st::dialogsWidthMin / 2) {
-			return true;
-		}
-		return false;
-	};
-
-	if (useOneColumnLayout()) {
-		dialogsWidth = chatWidth = bodyWidth;
-	} else if (useSmallColumnLayout()) {
-		layout = Adaptive::WindowLayout::SmallColumn;
-		auto forceWideDialogs = [this] {
-			if (dialogsListDisplayForced().value()) {
-				return true;
-			} else if (dialogsListFocused().value()) {
-				return true;
+		for (auto &[index, account] : _id.account->domain().accounts()) {
+			if (const auto anotherSession = account->maybeSession()) {
+				if (anotherSession->uniqueId() == prevSessionUniqueId) {
+					anotherSession->updates().updateOnline(crl::now());
+					return;
+				}
 			}
-			return !App::main()->isSectionShown();
-		};
-		if (forceWideDialogs()) {
-			dialogsWidth = st::dialogsWidthMin;
-		} else {
-			dialogsWidth = dialogsSmallColumnWidth();
 		}
-		chatWidth = bodyWidth - dialogsWidth;
-	} else {
-		layout = Adaptive::WindowLayout::Normal;
-		accumulate_max(dialogsWidth, st::dialogsWidthMin);
-		chatWidth = bodyWidth - dialogsWidth;
+	});
+
+	if (!isPrimary()) {
+		_id.account->sessionChanges(
+		) | rpl::start_with_next([=](Main::Session *session) {
+			Core::App().closeWindow(this);
+		}, _accountLifetime);
 	}
-	return { bodyWidth, dialogsWidth, chatWidth, layout };
+
+	_id.account->sessionValue(
+	) | rpl::start_with_next([=](Main::Session *session) {
+		const auto was = base::take(_sessionController);
+		_sessionController = session
+			? std::make_unique<SessionController>(session, this)
+			: nullptr;
+		_sessionControllerValue = _sessionController.get();
+
+		auto oldContentCache = _widget.grabForSlideAnimation();
+		_widget.updateWindowIcon();
+		if (session) {
+			setupSideBar();
+			setupMain(singlePeerShowAtMsgId, std::move(oldContentCache));
+
+			session->updates().isIdleValue(
+			) | rpl::filter([=](bool idle) {
+				return !idle;
+			}) | rpl::start_with_next([=] {
+				widget()->checkActivation();
+			}, _sessionController->lifetime());
+
+			session->termsLockValue(
+			) | rpl::start_with_next([=] {
+				checkLockByTerms();
+				_widget.updateGlobalMenu();
+			}, _sessionController->lifetime());
+
+			widget()->setInnerFocus();
+
+			_sessionController->activeChatChanges(
+			) | rpl::start_with_next([=] {
+				_widget.updateTitle();
+			}, _sessionController->lifetime());
+			_widget.updateTitle();
+
+			session->updates().updateOnline(crl::now());
+		} else {
+			sideBarChanged();
+			setupIntro(std::move(oldContentCache));
+			_widget.updateGlobalMenu();
+		}
+
+		crl::on_main(updateOnlineOfPrevSesssion);
+	}, _accountLifetime);
 }
 
-bool Controller::canProvideChatWidth(int requestedWidth) const {
-	auto currentLayout = computeColumnLayout();
-	auto extendBy = requestedWidth - currentLayout.chatWidth;
-	if (extendBy <= 0) {
-		return true;
-	}
-	return window()->canExtendWidthBy(extendBy);
-}
+void Controller::setupSideBar() {
+	Expects(_sessionController != nullptr);
 
-void Controller::provideChatWidth(int requestedWidth) {
-	auto currentLayout = computeColumnLayout();
-	auto extendBy = requestedWidth - currentLayout.chatWidth;
-	if (extendBy <= 0) {
+	if (!isPrimary()) {
 		return;
 	}
-	window()->tryToExtendWidthBy(extendBy);
-	auto newLayout = computeColumnLayout();
-	if (newLayout.windowLayout != Adaptive::WindowLayout::OneColumn) {
-		dialogsWidthRatio().set(float64(newLayout.bodyWidth - requestedWidth) / newLayout.bodyWidth, true);
+	_sessionController->filtersMenuChanged(
+	) | rpl::start_with_next([=] {
+		sideBarChanged();
+	}, _sessionController->lifetime());
+
+	if (_sessionController->session().settings().dialogsFiltersEnabled()
+		&& _sessionController->enoughSpaceForFilters()
+		&& !Core::App().settings().chatFiltersHorizontal()) {
+		_sessionController->toggleFiltersMenu(true);
+	} else {
+		sideBarChanged();
 	}
 }
 
-void Controller::showJumpToDate(not_null<PeerData*> peer, QDate requestedDate) {
-	Expects(peer != nullptr);
-	auto currentPeerDate = [peer] {
-		if (auto history = App::historyLoaded(peer)) {
-			if (history->scrollTopItem) {
-				return history->scrollTopItem->date.date();
-			} else if (history->loadedAtTop() && !history->isEmpty() && history->peer->migrateFrom()) {
-				if (auto migrated = App::historyLoaded(history->peer->migrateFrom())) {
-					if (migrated->scrollTopItem) {
-						// We're up in the migrated history.
-						// So current date is the date of first message here.
-						return history->blocks.front()->items.front()->date.date();
-					}
-				}
-			} else if (!history->lastMsgDate.isNull()) {
-				return history->lastMsgDate.date();
+void Controller::checkLockByTerms() {
+	const auto data = account().sessionExists()
+		? account().session().termsLocked()
+		: std::nullopt;
+	if (!data) {
+		if (_termsBox) {
+			_termsBox->closeBox();
+		}
+		return;
+	}
+	hideSettingsAndLayer(anim::type::instant);
+	const auto box = show(Box<TermsBox>(
+		*data,
+		tr::lng_terms_agree(),
+		tr::lng_terms_decline()));
+
+	box->setCloseByEscape(false);
+	box->setCloseByOutsideClick(false);
+
+	const auto id = data->id;
+	box->agreeClicks(
+	) | rpl::start_with_next([=] {
+		const auto mention = box ? box->lastClickedMention() : QString();
+		box->closeBox();
+		if (const auto session = account().maybeSession()) {
+			session->api().acceptTerms(id);
+			session->unlockTerms();
+			if (!mention.isEmpty()) {
+				MentionClickHandler(mention).onClick({});
 			}
 		}
-		return QDate::currentDate();
-	};
-	auto maxPeerDate = [peer] {
-		if (auto history = App::historyLoaded(peer)) {
-			if (!history->lastMsgDate.isNull()) {
-				return history->lastMsgDate.date();
-			}
+	}, box->lifetime());
+
+	box->cancelClicks(
+	) | rpl::start_with_next([=] {
+		showTermsDecline();
+	}, box->lifetime());
+
+	QObject::connect(box.get(), &QObject::destroyed, [=] {
+		crl::on_main(widget(), [=] { checkLockByTerms(); });
+	});
+
+	_termsBox = box;
+}
+
+void Controller::showTermsDecline() {
+	const auto box = show(Box<Window::TermsBox>(
+		TextWithEntities{ tr::lng_terms_update_sorry(tr::now) },
+		tr::lng_terms_decline_and_delete(),
+		tr::lng_terms_back(),
+		true));
+
+	box->agreeClicks(
+	) | rpl::start_with_next([=] {
+		if (box) {
+			box->closeBox();
 		}
-		return QDate::currentDate();
-	};
-	auto minPeerDate = [peer] {
-		if (auto history = App::historyLoaded(peer)) {
-			if (history->loadedAtTop()) {
-				if (history->isEmpty()) {
-					return QDate::currentDate();
-				}
-				return history->blocks.front()->items.front()->date.date();
-			}
+		showTermsDelete();
+	}, box->lifetime());
+
+	box->cancelClicks(
+	) | rpl::start_with_next([=] {
+		if (box) {
+			box->closeBox();
 		}
-		return QDate(2013, 8, 1); // Telegram was launched in August 2013 :)
+	}, box->lifetime());
+}
+
+void Controller::showTermsDelete() {
+	const auto deleteByTerms = [=] {
+		if (const auto session = account().maybeSession()) {
+			session->termsDeleteNow();
+		} else {
+			hideLayer();
+		}
 	};
-	auto highlighted = requestedDate.isNull() ? currentPeerDate() : requestedDate;
-	auto month = highlighted;
-	auto box = Box<CalendarBox>(month, highlighted, [this, peer](const QDate &date) { Auth().api().jumpToDate(peer, date); });
-	box->setMinDate(minPeerDate());
-	box->setMaxDate(maxPeerDate());
-	Ui::show(std::move(box));
+	show(Ui::MakeConfirmBox({
+		.text = tr::lng_terms_delete_warning(),
+		.confirmed = deleteByTerms,
+		.confirmText = tr::lng_terms_delete_now(),
+		.confirmStyle = &st::attentionBoxButton,
+	}));
+}
+
+void Controller::firstShow() {
+	_widget.firstShow();
+}
+
+void Controller::finishFirstShow() {
+	_widget.finishFirstShow();
+	checkThemeEditor();
+}
+
+Main::Session *Controller::maybeSession() const {
+	return _id.account ? _id.account->maybeSession() : nullptr;
+}
+
+auto Controller::sessionControllerValue() const
+-> rpl::producer<SessionController*> {
+	return _sessionControllerValue.value();
+}
+
+auto Controller::sessionControllerChanges() const
+-> rpl::producer<SessionController*> {
+	return _sessionControllerValue.changes();
+}
+
+bool Controller::locked() const {
+	if (Core::App().passcodeLocked()) {
+		return true;
+	} else if (const auto controller = sessionController()) {
+		return controller->session().termsLocked().has_value();
+	}
+	return false;
+}
+
+void Controller::checkThemeEditor() {
+	using namespace Window::Theme;
+
+	if (const auto editing = Background()->editingTheme()) {
+		showRightColumn(Box<Editor>(this, *editing));
+	}
+}
+
+void Controller::setupPasscodeLock() {
+	_widget.setupPasscodeLock();
+}
+
+void Controller::clearPasscodeLock() {
+	if (!_id) {
+		showAccount(&Core::App().activeAccount());
+	} else {
+		_widget.clearPasscodeLock();
+	}
+}
+
+void Controller::setupIntro(QPixmap oldContentCache) {
+	const auto point = Core::App().domain().maybeLastOrSomeAuthedAccount()
+		? Intro::EnterPoint::Qr
+		: Intro::EnterPoint::Start;
+	_widget.setupIntro(point, std::move(oldContentCache));
+}
+
+void Controller::setupMain(
+		MsgId singlePeerShowAtMsgId,
+		QPixmap oldContentCache) {
+	Expects(_sessionController != nullptr);
+
+	_widget.setupMain(singlePeerShowAtMsgId, std::move(oldContentCache));
+
+	if (const auto id = Ui::Emoji::NeedToSwitchBackToId()) {
+		Ui::Emoji::LoadAndSwitchTo(&_sessionController->session(), id);
+	}
+}
+
+void Controller::showSettings() {
+	_widget.showSettings();
+}
+
+int Controller::verticalShadowTop() const {
+	return (Platform::NativeTitleRequiresShadow()
+		&& Ui::Platform::NativeWindowFrameSupported()
+		&& Core::App().settings().nativeWindowFrame())
+		? st::lineWidth
+		: 0;
+}
+
+void Controller::showToast(Ui::Toast::Config &&config) {
+	Show(this).showToast(std::move(config));
+}
+
+void Controller::showToast(TextWithEntities &&text, crl::time duration) {
+	Show(this).showToast(std::move(text), duration);
+}
+
+void Controller::showToast(const QString &text, crl::time duration) {
+	Show(this).showToast(text, duration);
+}
+
+void Controller::showLayer(
+		std::unique_ptr<Ui::LayerWidget> &&layer,
+		Ui::LayerOptions options,
+		anim::type animated) {
+	_widget.showOrHideBoxOrLayer(std::move(layer), options, animated);
+}
+
+void Controller::showBox(
+		object_ptr<Ui::BoxContent> content,
+		Ui::LayerOptions options,
+		anim::type animated) {
+	_widget.showOrHideBoxOrLayer(std::move(content), options, animated);
+}
+
+void Controller::showRightColumn(object_ptr<Ui::RpWidget> widget) {
+	_widget.showRightColumn(std::move(widget));
+}
+
+void Controller::hideLayer(anim::type animated) {
+	_widget.showOrHideBoxOrLayer(v::null, Ui::LayerOption::CloseOther, animated);
+}
+
+void Controller::hideSettingsAndLayer(anim::type animated) {
+	_widget.ui_hideSettingsAndLayer(animated);
+}
+
+bool Controller::isLayerShown() const {
+	return _widget.ui_isLayerShown();
+}
+
+void Controller::sideBarChanged() {
+	_widget.recountGeometryConstraints();
+}
+
+void Controller::activate() {
+	_widget.activate();
+}
+
+void Controller::updateIsActiveFocus() {
+	_isActiveTimer.callOnce(sessionController()
+		? sessionController()->session().serverConfig().onlineFocusTimeout
+		: crl::time(1000));
+}
+
+void Controller::updateIsActiveBlur() {
+	_isActiveTimer.callOnce(sessionController()
+		? sessionController()->session().serverConfig().offlineBlurTimeout
+		: crl::time(1000));
+}
+
+void Controller::updateIsActive() {
+	_widget.updateIsActive();
+}
+
+void Controller::minimize() {
+	if (Core::App().settings().workMode()
+			== Core::Settings::WorkMode::TrayOnly) {
+		_widget.minimizeToTray();
+	} else {
+		_widget.setWindowState(_widget.windowState() | Qt::WindowMinimized);
+	}
+}
+
+void Controller::close() {
+	_widget.close();
+}
+
+void Controller::preventOrInvoke(Fn<void()> &&callback) {
+	_widget.preventOrInvoke(std::move(callback));
+}
+
+void Controller::invokeForSessionController(
+		not_null<Main::Account*> account,
+		PeerData *singlePeer,
+		Fn<void(not_null<SessionController*>)> &&callback) {
+	const auto separateWindow = singlePeer
+		? Core::App().separateWindowFor(not_null(singlePeer))
+		: nullptr;
+	const auto separateSession = separateWindow
+		? separateWindow->sessionController()
+		: nullptr;
+	if (separateSession) {
+		return callback(separateSession);
+	}
+	const auto accountWindow = account
+		? Core::App().separateWindowFor(not_null(account))
+		: nullptr;
+	const auto accountSession = accountWindow
+		? accountWindow->sessionController()
+		: nullptr;
+	if (accountSession) {
+		return callback(accountSession);
+	}
+	_id.account->domain().activate(std::move(account));
+	if (_sessionController) {
+		callback(_sessionController.get());
+	}
+}
+
+QPoint Controller::getPointForCallPanelCenter() const {
+	return _widget.isActive()
+		? _widget.geometry().center()
+		: _widget.screen()->geometry().center();
+}
+
+void Controller::showLogoutConfirmation() {
+	const auto account = Core::App().passcodeLocked()
+		? nullptr
+		: sessionController()
+		? &sessionController()->session().account()
+		: nullptr;
+	const auto weak = base::make_weak(account);
+	const auto callback = [=](Fn<void()> close) {
+		if (!account || weak) {
+			Core::App().logoutWithChecks(account);
+		}
+		if (close) {
+			close();
+		}
+	};
+	show(Ui::MakeConfirmBox({
+		.text = tr::lng_sure_logout(),
+		.confirmed = callback,
+		.confirmText = tr::lng_settings_logout(),
+		.confirmStyle = &st::attentionBoxButton,
+	}));
+}
+
+Window::Adaptive &Controller::adaptive() const {
+	return *_adaptive;
+}
+
+void Controller::openInMediaView(Media::View::OpenRequest &&request) {
+	_openInMediaViewRequests.fire(std::move(request));
+}
+
+auto Controller::openInMediaViewRequests() const
+-> rpl::producer<Media::View::OpenRequest> {
+	return _openInMediaViewRequests.events();
+}
+
+void Controller::setDefaultFloatPlayerDelegate(
+		not_null<Media::Player::FloatDelegate*> delegate) {
+	_defaultFloatPlayerDelegate = delegate;
+	_replacementFloatPlayerDelegate = nullptr;
+	_floatPlayerDelegate = delegate;
+}
+
+void Controller::replaceFloatPlayerDelegate(
+		not_null<Media::Player::FloatDelegate*> replacement) {
+	Expects(_defaultFloatPlayerDelegate != nullptr);
+
+	_replacementFloatPlayerDelegate = replacement;
+	_floatPlayerDelegate = replacement;
+}
+
+void Controller::restoreFloatPlayerDelegate(
+		not_null<Media::Player::FloatDelegate*> replacement) {
+	Expects(_defaultFloatPlayerDelegate != nullptr);
+
+	if (_replacementFloatPlayerDelegate == replacement) {
+		_replacementFloatPlayerDelegate = nullptr;
+		_floatPlayerDelegate = _defaultFloatPlayerDelegate;
+	}
+}
+
+auto Controller::floatPlayerDelegate() const -> FloatDelegate* {
+	return _floatPlayerDelegate.current();
+}
+
+auto Controller::floatPlayerDelegateValue() const
+-> rpl::producer<FloatDelegate*> {
+	return _floatPlayerDelegate.value();
+}
+
+std::shared_ptr<Ui::Show> Controller::uiShow() {
+	return std::make_shared<Show>(this);
+}
+
+rpl::lifetime &Controller::lifetime() {
+	return _lifetime;
 }
 
 } // namespace Window

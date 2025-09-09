@@ -1,39 +1,59 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
+
+namespace Core {
+enum class QuitReason;
+} // namespace Core
 
 namespace Platform {
 
 void start();
 void finish();
 
-void SetWatchingMediaKeys(bool watching);
-bool TranslucentWindowsSupported(QPoint globalPosition);
-void StartTranslucentPaint(QPainter &p, QPaintEvent *e);
-void InitOnTopPanel(QWidget *panel);
-void DeInitOnTopPanel(QWidget *panel);
-void ReInitOnTopPanel(QWidget *panel);
+enum class PermissionStatus {
+	Granted,
+	CanRequest,
+	Denied,
+};
 
-QString SystemLanguage();
-QString SystemCountry();
+enum class PermissionType {
+	Microphone,
+	Camera,
+};
+
+enum class SystemSettingsType {
+	Audio,
+};
+
+void SetApplicationIcon(const QIcon &icon);
+[[nodiscard]] QString SingleInstanceLocalServerName(const QString &hash);
+[[nodiscard]] PermissionStatus GetPermissionStatus(PermissionType type);
+void RequestPermission(PermissionType type, Fn<void(PermissionStatus)> resultCallback);
+void OpenSystemSettingsForPermission(PermissionType type);
+bool OpenSystemSettings(SystemSettingsType type);
+void IgnoreApplicationActivationRightNow();
+[[nodiscard]] bool AutostartSupported();
+void AutostartRequestStateFromSystem(Fn<void(bool)> callback);
+void AutostartToggle(bool enabled, Fn<void(bool)> done = nullptr);
+[[nodiscard]] bool AutostartSkip();
+[[nodiscard]] bool TrayIconSupported();
+[[nodiscard]] bool SkipTaskbarSupported();
+void WriteCrashDumpDetails();
+void NewVersionLaunched(int oldVersion);
+[[nodiscard]] QImage DefaultApplicationIcon();
+[[nodiscard]] QString ApplicationIconName();
+[[nodiscard]] bool PreventsQuit(Core::QuitReason reason);
+[[nodiscard]] QString ExecutablePathForShortcuts();
+
+#if QT_VERSION < QT_VERSION_CHECK(6, 5, 0)
+[[nodiscard]] std::optional<bool> IsDarkMode();
+#endif // Qt < 6.5.0
 
 namespace ThirdParty {
 
@@ -43,10 +63,10 @@ void finish();
 } // namespace ThirdParty
 } // namespace Platform
 
-#ifdef Q_OS_MAC
-#include "platform/mac/specific_mac.h"
-#elif defined Q_OS_LINUX // Q_OS_MAC
-#include "platform/linux/specific_linux.h"
-#elif defined Q_OS_WIN // Q_OS_MAC || Q_OS_LINUX
+#ifdef Q_OS_WIN
 #include "platform/win/specific_win.h"
-#endif // Q_OS_MAC || Q_OS_LINUX || Q_OS_WIN
+#elif defined Q_OS_MAC // Q_OS_WIN
+#include "platform/mac/specific_mac.h"
+#else // Q_OS_WIN || Q_OS_MAC
+#include "platform/linux/specific_linux.h"
+#endif // else for Q_OS_WIN || Q_OS_MAC

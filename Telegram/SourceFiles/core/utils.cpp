@@ -1,25 +1,16 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "core/utils.h"
 
+#include "base/qthelp_url.h"
+#include "platform/platform_specific.h"
+
+extern "C" {
 #include <openssl/crypto.h>
 #include <openssl/sha.h>
 #include <openssl/err.h>
@@ -27,16 +18,10 @@ Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
 #include <openssl/engine.h>
 #include <openssl/conf.h>
 #include <openssl/ssl.h>
-
-extern "C" {
+#include <openssl/rand.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
-}
-
-#include "application.h"
-#include "platform/platform_specific.h"
-
-uint64 _SharedMemoryLocation[4] = { 0x00, 0x01, 0x02, 0x03 };
+} // extern "C"
 
 #ifdef Q_OS_WIN
 #elif defined Q_OS_MAC
@@ -45,7 +30,7 @@ uint64 _SharedMemoryLocation[4] = { 0x00, 0x01, 0x02, 0x03 };
 #include <time.h>
 #endif
 
-#include <openssl/rand.h>
+uint64 _SharedMemoryLocation[4] = { 0x00, 0x01, 0x02, 0x03 };
 
 // Base types compile-time check
 static_assert(sizeof(char) == 1, "Basic types size check failed");
@@ -65,195 +50,9 @@ static_assert(sizeof(MTPint128) == 16, "Basic types size check failed");
 static_assert(sizeof(MTPint256) == 32, "Basic types size check failed");
 static_assert(sizeof(MTPdouble) == 8, "Basic types size check failed");
 
-// Unixtime functions
-
-namespace {
-	QReadWriteLock unixtimeLock;
-	volatile int32 unixtimeDelta = 0;
-	volatile bool unixtimeWasSet = false;
-    volatile uint64 _msgIdStart, _msgIdLocal = 0, _msgIdMsStart;
-	int32 _reqId = 0;
-
-	void _initMsgIdConstants() {
-#ifdef Q_OS_WIN
-		LARGE_INTEGER li;
-		QueryPerformanceCounter(&li);
-		_msgIdMsStart = li.QuadPart;
-#elif defined Q_OS_MAC
-		_msgIdMsStart = mach_absolute_time();
-#else
-		timespec ts;
-		clock_gettime(CLOCK_REALTIME, &ts);
-		_msgIdMsStart = 1000000000 * uint64(ts.tv_sec) + uint64(ts.tv_nsec);
-#endif
-
-		uint32 msgIdRand;
-		memset_rand(&msgIdRand, sizeof(uint32));
-		_msgIdStart = (((uint64)((uint32)unixtime()) << 32) | (uint64)msgIdRand);
-	}
-}
-
-TimeId myunixtime() {
-	return (TimeId)time(NULL);
-}
-
-void unixtimeInit() {
-	{
-		QWriteLocker locker(&unixtimeLock);
-		unixtimeWasSet = false;
-		unixtimeDelta = 0;
-	}
-	_initMsgIdConstants();
-}
-
-void unixtimeSet(int32 serverTime, bool force) {
-	{
-		QWriteLocker locker(&unixtimeLock);
-		if (force) {
-			DEBUG_LOG(("MTP Info: forced setting client unixtime to %1").arg(serverTime));
-		} else {
-			if (unixtimeWasSet) return;
-			DEBUG_LOG(("MTP Info: setting client unixtime to %1").arg(serverTime));
-		}
-		unixtimeWasSet = true;
-		unixtimeDelta = serverTime + 1 - myunixtime();
-		DEBUG_LOG(("MTP Info: now unixtimeDelta is %1").arg(unixtimeDelta));
-	}
-	_initMsgIdConstants();
-}
-
-TimeId unixtime() {
-	auto result = myunixtime();
-
-	QReadLocker locker(&unixtimeLock);
-	return result + unixtimeDelta;
-}
-
-TimeId fromServerTime(const MTPint &serverTime) {
-	QReadLocker locker(&unixtimeLock);
-	return serverTime.v - unixtimeDelta;
-}
-
-void toServerTime(const TimeId &clientTime, MTPint &outServerTime) {
-	QReadLocker locker(&unixtimeLock);
-	outServerTime = MTP_int(clientTime + unixtimeDelta);
-}
-
-QDateTime dateFromServerTime(TimeId time) {
-	return dateFromServerTime(MTP_int(time));
-}
+static_assert(sizeof(int) >= 4, "Basic types size check failed");
 
 // Precise timing functions / rand init
-
-struct CRYPTO_dynlock_value {
-	QMutex mutex;
-};
-
-namespace {
-	bool _sslInited = false;
-	QMutex *_sslLocks = nullptr;
-	void _sslLockingCallback(int mode, int type, const char *file, int line) {
-		if (!_sslLocks) return; // not inited
-
-		if (mode & CRYPTO_LOCK) {
-			_sslLocks[type].lock();
-		} else {
-			_sslLocks[type].unlock();
-		}
-	}
-	void _sslThreadId(CRYPTO_THREADID *id) {
-		CRYPTO_THREADID_set_pointer(id, QThread::currentThreadId());
-	}
-	CRYPTO_dynlock_value *_sslCreateFunction(const char *file, int line) {
-		return new CRYPTO_dynlock_value();
-	}
-	void _sslLockFunction(int mode, CRYPTO_dynlock_value *l, const char *file, int line) {
-		if (mode & CRYPTO_LOCK) {
-			l->mutex.lock();
-		} else {
-			l->mutex.unlock();
-		}
-	}
-	void _sslDestroyFunction(CRYPTO_dynlock_value *l, const char *file, int line) {
-		delete l;
-	}
-
-	int _ffmpegLockManager(void **mutex, AVLockOp op) {
-		switch (op) {
-		case AV_LOCK_CREATE: {
-			Assert(*mutex == 0);
-			*mutex = reinterpret_cast<void*>(new QMutex());
-		} break;
-
-		case AV_LOCK_OBTAIN: {
-			Assert(*mutex != 0);
-			reinterpret_cast<QMutex*>(*mutex)->lock();
-		} break;
-
-		case AV_LOCK_RELEASE: {
-			Assert(*mutex != 0);
-			reinterpret_cast<QMutex*>(*mutex)->unlock();
-		}; break;
-
-		case AV_LOCK_DESTROY: {
-			Assert(*mutex != 0);
-			delete reinterpret_cast<QMutex*>(*mutex);
-			*mutex = 0;
-		} break;
-		}
-		return 0;
-	}
-
-	float64 _msFreq;
-	float64 _msgIdCoef;
-	TimeMs _msStart = 0, _msAddToMsStart = 0, _msAddToUnixtime = 0;
-	int32 _timeStart = 0;
-
-	class _MsInitializer {
-	public:
-		_MsInitializer() {
-#ifdef Q_OS_WIN
-			LARGE_INTEGER li;
-			QueryPerformanceFrequency(&li);
-            _msFreq = 1000. / float64(li.QuadPart);
-
-			// 0xFFFF0000L istead of 0x100000000L to make msgId grow slightly slower, than unixtime and we had time to reconfigure
-			_msgIdCoef = float64(0xFFFF0000L) / float64(li.QuadPart);
-
-			QueryPerformanceCounter(&li);
-			_msStart = li.QuadPart;
-#elif defined Q_OS_MAC
-            mach_timebase_info_data_t tb = { 0, 0 };
-            mach_timebase_info(&tb);
-            _msFreq = (float64(tb.numer) / tb.denom) / 1000000.;
-
-            _msgIdCoef = _msFreq * (float64(0xFFFF0000L) / 1000.);
-
-            _msStart = mach_absolute_time();
-#else
-            timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            //_msFreq = 1 / 1000000.;
-            _msgIdCoef = float64(0xFFFF0000L) / 1000000000.;
-            _msStart = 1000LL * static_cast<TimeMs>(ts.tv_sec) + (static_cast<TimeMs>(ts.tv_nsec) / 1000000LL);
-#endif
-			_timeStart = myunixtime();
-			srand((uint32)(_msStart & 0xFFFFFFFFL));
-		}
-	};
-
-	void _msInitialize() {
-		static _MsInitializer _msInitializer;
-	}
-
-	class _MsStarter {
-	public:
-		_MsStarter() {
-			getms();
-		}
-	};
-	_MsStarter _msStarter;
-}
 
 namespace ThirdParty {
 
@@ -261,171 +60,39 @@ namespace ThirdParty {
 		Platform::ThirdParty::start();
 
 		if (!RAND_status()) { // should be always inited in all modern OS
-			char buf[16];
-			memcpy(buf, &_msStart, 8);
-			memcpy(buf + 8, &_msFreq, 8);
-			uchar sha256Buffer[32];
-			RAND_seed(hashSha256(buf, 16, sha256Buffer), 32);
+			const auto FeedSeed = [](auto value) {
+				RAND_seed(&value, sizeof(value));
+			};
+#ifdef Q_OS_WIN
+			LARGE_INTEGER li;
+			QueryPerformanceFrequency(&li);
+			FeedSeed(li.QuadPart);
+			QueryPerformanceCounter(&li);
+			FeedSeed(li.QuadPart);
+#elif defined Q_OS_MAC
+			mach_timebase_info_data_t tb = { 0 };
+			mach_timebase_info(&tb);
+			FeedSeed(tb);
+			FeedSeed(mach_absolute_time());
+#else
+			timespec ts = { 0 };
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			FeedSeed(ts);
+#endif
 			if (!RAND_status()) {
 				LOG(("MTP Error: Could not init OpenSSL rand, RAND_status() is 0..."));
 			}
 		}
-
-		// Force OpenSSL loading if it is linked in Qt,
-		// so that we won't mess with our OpenSSL locking with Qt OpenSSL locking.
-		auto sslSupported = QSslSocket::supportsSsl();
-		if (!sslSupported) {
-			LOG(("Error: current Qt build doesn't support SSL requests."));
-		}
-		if (!CRYPTO_get_locking_callback()) {
-			// Qt didn't initialize OpenSSL, so we will.
-			auto numLocks = CRYPTO_num_locks();
-			if (numLocks) {
-				_sslLocks = new QMutex[numLocks];
-				CRYPTO_set_locking_callback(_sslLockingCallback);
-			} else {
-				LOG(("MTP Error: Could not init OpenSSL threads, CRYPTO_num_locks() returned zero!"));
-			}
-			CRYPTO_THREADID_set_callback(_sslThreadId);
-		}
-		if (!CRYPTO_get_dynlock_create_callback()) {
-			CRYPTO_set_dynlock_create_callback(_sslCreateFunction);
-			CRYPTO_set_dynlock_lock_callback(_sslLockFunction);
-			CRYPTO_set_dynlock_destroy_callback(_sslDestroyFunction);
-		} else if (!CRYPTO_get_dynlock_lock_callback()) {
-			LOG(("MTP Error: dynlock_create callback is set without dynlock_lock callback!"));
-		}
-
-		av_register_all();
-		avcodec_register_all();
-
-		av_lockmgr_register(_ffmpegLockManager);
-
-		_sslInited = true;
 	}
 
 	void finish() {
-		av_lockmgr_register(nullptr);
-
-		CRYPTO_cleanup_all_ex_data();
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+		EVP_default_properties_enable_fips(nullptr, 0);
+#else
 		FIPS_mode_set(0);
-		ENGINE_cleanup();
+#endif
 		CONF_modules_unload(1);
-		ERR_remove_state(0);
-		ERR_free_strings();
-		ERR_remove_thread_state(nullptr);
-		EVP_cleanup();
-
-		delete[] base::take(_sslLocks);
-
-		Platform::ThirdParty::finish();
 	}
-}
-
-bool checkms() {
-	auto unixms = (myunixtime() - _timeStart) * 1000LL + _msAddToUnixtime;
-	auto ms = getms(true);
-	if (ms > unixms + 1000LL) {
-		_msAddToUnixtime = ((ms - unixms) / 1000LL) * 1000LL;
-	} else if (unixms > ms + 1000LL) {
-		_msAddToMsStart += ((unixms - ms) / 1000LL) * 1000LL;
-		Sandbox::adjustSingleTimers();
-		return true;
-	}
-	return false;
-}
-
-TimeMs getms(bool checked) {
-    _msInitialize();
-#ifdef Q_OS_WIN
-    LARGE_INTEGER li;
-    QueryPerformanceCounter(&li);
-	return ((li.QuadPart - _msStart) * _msFreq) + (checked ? _msAddToMsStart : 0LL);
-#elif defined Q_OS_MAC
-	auto msCount = static_cast<TimeMs>(mach_absolute_time());
-	return ((msCount - _msStart) * _msFreq) + (checked ? _msAddToMsStart : 0LL);
-#else
-    timespec ts;
-    auto res = clock_gettime(CLOCK_MONOTONIC, &ts);
-    if (res != 0) {
-        LOG(("Bad clock_gettime result: %1").arg(res));
-        return 0;
-    }
-    auto msCount = 1000LL * static_cast<TimeMs>(ts.tv_sec) + (static_cast<TimeMs>(ts.tv_nsec) / 1000000LL);
-    return (msCount - _msStart) + (checked ? _msAddToMsStart : 0LL);
-#endif
-}
-
-uint64 msgid() {
-#ifdef Q_OS_WIN
-    LARGE_INTEGER li;
-    QueryPerformanceCounter(&li);
-    uint64 result = _msgIdStart + (uint64)floor((li.QuadPart - _msgIdMsStart) * _msgIdCoef);
-#elif defined Q_OS_MAC
-    uint64 msCount = mach_absolute_time();
-    uint64 result = _msgIdStart + (uint64)floor((msCount - _msgIdMsStart) * _msgIdCoef);
-#else
-    timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64 msCount = 1000000000 * uint64(ts.tv_sec) + uint64(ts.tv_nsec);
-    uint64 result = _msgIdStart + (uint64)floor((msCount - _msgIdMsStart) * _msgIdCoef);
-#endif
-
-	result &= ~0x03L;
-
-	return result + (_msgIdLocal += 4);
-}
-
-int32 reqid() {
-	QWriteLocker locker(&unixtimeLock);
-	if (_reqId == INT_MAX) {
-		_reqId = 0;
-	}
-	return ++_reqId;
-}
-
-// crc32 hash, taken somewhere from the internet
-
-namespace {
-	uint32 _crc32Table[256];
-	class _Crc32Initializer {
-	public:
-		_Crc32Initializer() {
-			uint32 poly = 0x04c11db7;
-			for (uint32 i = 0; i < 256; ++i) {
-				_crc32Table[i] = reflect(i, 8) << 24;
-				for (uint32 j = 0; j < 8; ++j) {
-					_crc32Table[i] = (_crc32Table[i] << 1) ^ (_crc32Table[i] & (1 << 31) ? poly : 0);
-				}
-				_crc32Table[i] = reflect(_crc32Table[i], 32);
-			}
-		}
-
-	private:
-		uint32 reflect(uint32 val, char ch) {
-			uint32 result = 0;
-			for (int i = 1; i < (ch + 1); ++i) {
-				if (val & 1) {
-					result |= 1 << (ch - i);
-				}
-				val >>= 1;
-			}
-			return result;
-		}
-	};
-}
-
-int32 hashCrc32(const void *data, uint32 len) {
-	static _Crc32Initializer _crc32Initializer;
-
-	const uchar *buf = (const uchar *)data;
-
-	uint32 crc(0xffffffff);
-    for (uint32 i = 0; i < len; ++i) {
-		crc = (crc >> 8) ^ _crc32Table[(crc & 0xFF) ^ buf[i]];
-	}
-
-    return crc ^ 0xffffffff;
 }
 
 int32 *hashSha1(const void *data, uint32 len, void *dest) {
@@ -661,26 +328,22 @@ char *hashMd5Hex(const int32 *hashmd5, void *dest) {
 	return md5To;
 }
 
-void memset_rand(void *data, uint32 len) {
-	Assert(_sslInited);
-	RAND_bytes((uchar*)data, len);
-}
-
 namespace {
 	QMap<QString, QString> fastRusEng;
 	QHash<QChar, QString> fastLetterRusEng;
 	QMap<uint32, QString> fastDoubleLetterRusEng;
 	QHash<QChar, QChar> fastRusKeyboardSwitch;
+	QHash<QChar, QChar> fastUkrKeyboardSwitch;
 }
 
 QString translitLetterRusEng(QChar letter, QChar next, int32 &toSkip) {
 	if (fastDoubleLetterRusEng.isEmpty()) {
-		fastDoubleLetterRusEng.insert((QString::fromUtf8("Ы").at(0).unicode() << 16) | QString::fromUtf8("й").at(0).unicode(), qsl("Y"));
-		fastDoubleLetterRusEng.insert((QString::fromUtf8("и").at(0).unicode() << 16) | QString::fromUtf8("я").at(0).unicode(), qsl("ia"));
-		fastDoubleLetterRusEng.insert((QString::fromUtf8("и").at(0).unicode() << 16) | QString::fromUtf8("й").at(0).unicode(), qsl("y"));
-		fastDoubleLetterRusEng.insert((QString::fromUtf8("к").at(0).unicode() << 16) | QString::fromUtf8("с").at(0).unicode(), qsl("x"));
-		fastDoubleLetterRusEng.insert((QString::fromUtf8("ы").at(0).unicode() << 16) | QString::fromUtf8("й").at(0).unicode(), qsl("y"));
-		fastDoubleLetterRusEng.insert((QString::fromUtf8("ь").at(0).unicode() << 16) | QString::fromUtf8("е").at(0).unicode(), qsl("ye"));
+		fastDoubleLetterRusEng.insert((QString::fromUtf8("Ы").at(0).unicode() << 16) | QString::fromUtf8("й").at(0).unicode(), u"Y"_q);
+		fastDoubleLetterRusEng.insert((QString::fromUtf8("и").at(0).unicode() << 16) | QString::fromUtf8("я").at(0).unicode(), u"ia"_q);
+		fastDoubleLetterRusEng.insert((QString::fromUtf8("и").at(0).unicode() << 16) | QString::fromUtf8("й").at(0).unicode(), u"y"_q);
+		fastDoubleLetterRusEng.insert((QString::fromUtf8("к").at(0).unicode() << 16) | QString::fromUtf8("с").at(0).unicode(), u"x"_q);
+		fastDoubleLetterRusEng.insert((QString::fromUtf8("ы").at(0).unicode() << 16) | QString::fromUtf8("й").at(0).unicode(), u"y"_q);
+		fastDoubleLetterRusEng.insert((QString::fromUtf8("ь").at(0).unicode() << 16) | QString::fromUtf8("е").at(0).unicode(), u"ye"_q);
 	}
 	QMap<uint32, QString>::const_iterator i = fastDoubleLetterRusEng.constFind((letter.unicode() << 16) | next.unicode());
 	if (i != fastDoubleLetterRusEng.cend()) {
@@ -690,82 +353,82 @@ QString translitLetterRusEng(QChar letter, QChar next, int32 &toSkip) {
 
 	toSkip = 1;
 	if (fastLetterRusEng.isEmpty()) {
-		fastLetterRusEng.insert(QString::fromUtf8("А").at(0), qsl("A"));
-		fastLetterRusEng.insert(QString::fromUtf8("Б").at(0), qsl("B"));
-		fastLetterRusEng.insert(QString::fromUtf8("В").at(0), qsl("V"));
-		fastLetterRusEng.insert(QString::fromUtf8("Г").at(0), qsl("G"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ґ").at(0), qsl("G"));
-		fastLetterRusEng.insert(QString::fromUtf8("Д").at(0), qsl("D"));
-		fastLetterRusEng.insert(QString::fromUtf8("Е").at(0), qsl("E"));
-		fastLetterRusEng.insert(QString::fromUtf8("Є").at(0), qsl("Ye"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ё").at(0), qsl("Yo"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ж").at(0), qsl("Zh"));
-		fastLetterRusEng.insert(QString::fromUtf8("З").at(0), qsl("Z"));
-		fastLetterRusEng.insert(QString::fromUtf8("И").at(0), qsl("I"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ї").at(0), qsl("Yi"));
-		fastLetterRusEng.insert(QString::fromUtf8("І").at(0), qsl("I"));
-		fastLetterRusEng.insert(QString::fromUtf8("Й").at(0), qsl("J"));
-		fastLetterRusEng.insert(QString::fromUtf8("К").at(0), qsl("K"));
-		fastLetterRusEng.insert(QString::fromUtf8("Л").at(0), qsl("L"));
-		fastLetterRusEng.insert(QString::fromUtf8("М").at(0), qsl("M"));
-		fastLetterRusEng.insert(QString::fromUtf8("Н").at(0), qsl("N"));
-		fastLetterRusEng.insert(QString::fromUtf8("О").at(0), qsl("O"));
-		fastLetterRusEng.insert(QString::fromUtf8("П").at(0), qsl("P"));
-		fastLetterRusEng.insert(QString::fromUtf8("Р").at(0), qsl("R"));
-		fastLetterRusEng.insert(QString::fromUtf8("С").at(0), qsl("S"));
-		fastLetterRusEng.insert(QString::fromUtf8("Т").at(0), qsl("T"));
-		fastLetterRusEng.insert(QString::fromUtf8("У").at(0), qsl("U"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ў").at(0), qsl("W"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ф").at(0), qsl("F"));
-		fastLetterRusEng.insert(QString::fromUtf8("Х").at(0), qsl("Kh"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ц").at(0), qsl("Ts"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ч").at(0), qsl("Ch"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ш").at(0), qsl("Sh"));
-		fastLetterRusEng.insert(QString::fromUtf8("Щ").at(0), qsl("Sch"));
-		fastLetterRusEng.insert(QString::fromUtf8("Э").at(0), qsl("E"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ю").at(0), qsl("Yu"));
-		fastLetterRusEng.insert(QString::fromUtf8("Я").at(0), qsl("Ya"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ў").at(0), qsl("W"));
-		fastLetterRusEng.insert(QString::fromUtf8("а").at(0), qsl("a"));
-		fastLetterRusEng.insert(QString::fromUtf8("б").at(0), qsl("b"));
-		fastLetterRusEng.insert(QString::fromUtf8("в").at(0), qsl("v"));
-		fastLetterRusEng.insert(QString::fromUtf8("г").at(0), qsl("g"));
-		fastLetterRusEng.insert(QString::fromUtf8("ґ").at(0), qsl("g"));
-		fastLetterRusEng.insert(QString::fromUtf8("д").at(0), qsl("d"));
-		fastLetterRusEng.insert(QString::fromUtf8("е").at(0), qsl("e"));
-		fastLetterRusEng.insert(QString::fromUtf8("є").at(0), qsl("ye"));
-		fastLetterRusEng.insert(QString::fromUtf8("ё").at(0), qsl("yo"));
-		fastLetterRusEng.insert(QString::fromUtf8("ж").at(0), qsl("zh"));
-		fastLetterRusEng.insert(QString::fromUtf8("з").at(0), qsl("z"));
-		fastLetterRusEng.insert(QString::fromUtf8("й").at(0), qsl("y"));
-		fastLetterRusEng.insert(QString::fromUtf8("ї").at(0), qsl("yi"));
-		fastLetterRusEng.insert(QString::fromUtf8("і").at(0), qsl("i"));
-		fastLetterRusEng.insert(QString::fromUtf8("л").at(0), qsl("l"));
-		fastLetterRusEng.insert(QString::fromUtf8("м").at(0), qsl("m"));
-		fastLetterRusEng.insert(QString::fromUtf8("н").at(0), qsl("n"));
-		fastLetterRusEng.insert(QString::fromUtf8("о").at(0), qsl("o"));
-		fastLetterRusEng.insert(QString::fromUtf8("п").at(0), qsl("p"));
-		fastLetterRusEng.insert(QString::fromUtf8("р").at(0), qsl("r"));
-		fastLetterRusEng.insert(QString::fromUtf8("с").at(0), qsl("s"));
-		fastLetterRusEng.insert(QString::fromUtf8("т").at(0), qsl("t"));
-		fastLetterRusEng.insert(QString::fromUtf8("у").at(0), qsl("u"));
-		fastLetterRusEng.insert(QString::fromUtf8("ў").at(0), qsl("w"));
-		fastLetterRusEng.insert(QString::fromUtf8("ф").at(0), qsl("f"));
-		fastLetterRusEng.insert(QString::fromUtf8("х").at(0), qsl("kh"));
-		fastLetterRusEng.insert(QString::fromUtf8("ц").at(0), qsl("ts"));
-		fastLetterRusEng.insert(QString::fromUtf8("ч").at(0), qsl("ch"));
-		fastLetterRusEng.insert(QString::fromUtf8("ш").at(0), qsl("sh"));
-		fastLetterRusEng.insert(QString::fromUtf8("щ").at(0), qsl("sch"));
-		fastLetterRusEng.insert(QString::fromUtf8("ъ").at(0), qsl(""));
-		fastLetterRusEng.insert(QString::fromUtf8("э").at(0), qsl("e"));
-		fastLetterRusEng.insert(QString::fromUtf8("ю").at(0), qsl("yu"));
-		fastLetterRusEng.insert(QString::fromUtf8("я").at(0), qsl("ya"));
-		fastLetterRusEng.insert(QString::fromUtf8("ў").at(0), qsl("w"));
-		fastLetterRusEng.insert(QString::fromUtf8("Ы").at(0), qsl("Y"));
-		fastLetterRusEng.insert(QString::fromUtf8("и").at(0), qsl("i"));
-		fastLetterRusEng.insert(QString::fromUtf8("к").at(0), qsl("k"));
-		fastLetterRusEng.insert(QString::fromUtf8("ы").at(0), qsl("y"));
-		fastLetterRusEng.insert(QString::fromUtf8("ь").at(0), qsl(""));
+		fastLetterRusEng.insert(QString::fromUtf8("А").at(0), u"A"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Б").at(0), u"B"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("В").at(0), u"V"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Г").at(0), u"G"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ґ").at(0), u"G"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Д").at(0), u"D"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Е").at(0), u"E"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Є").at(0), u"Ye"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ё").at(0), u"Yo"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ж").at(0), u"Zh"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("З").at(0), u"Z"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("И").at(0), u"I"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ї").at(0), u"Yi"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("І").at(0), u"I"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Й").at(0), u"J"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("К").at(0), u"K"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Л").at(0), u"L"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("М").at(0), u"M"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Н").at(0), u"N"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("О").at(0), u"O"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("П").at(0), u"P"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Р").at(0), u"R"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("С").at(0), u"S"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Т").at(0), u"T"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("У").at(0), u"U"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ў").at(0), u"W"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ф").at(0), u"F"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Х").at(0), u"Kh"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ц").at(0), u"Ts"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ч").at(0), u"Ch"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ш").at(0), u"Sh"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Щ").at(0), u"Sch"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Э").at(0), u"E"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ю").at(0), u"Yu"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Я").at(0), u"Ya"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ў").at(0), u"W"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("а").at(0), u"a"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("б").at(0), u"b"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("в").at(0), u"v"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("г").at(0), u"g"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ґ").at(0), u"g"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("д").at(0), u"d"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("е").at(0), u"e"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("є").at(0), u"ye"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ё").at(0), u"yo"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ж").at(0), u"zh"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("з").at(0), u"z"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("й").at(0), u"y"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ї").at(0), u"yi"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("і").at(0), u"i"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("л").at(0), u"l"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("м").at(0), u"m"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("н").at(0), u"n"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("о").at(0), u"o"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("п").at(0), u"p"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("р").at(0), u"r"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("с").at(0), u"s"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("т").at(0), u"t"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("у").at(0), u"u"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ў").at(0), u"w"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ф").at(0), u"f"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("х").at(0), u"kh"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ц").at(0), u"ts"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ч").at(0), u"ch"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ш").at(0), u"sh"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("щ").at(0), u"sch"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ъ").at(0), QString());
+		fastLetterRusEng.insert(QString::fromUtf8("э").at(0), u"e"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ю").at(0), u"yu"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("я").at(0), u"ya"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ў").at(0), u"w"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("Ы").at(0), u"Y"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("и").at(0), u"i"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("к").at(0), u"k"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ы").at(0), u"y"_q);
+		fastLetterRusEng.insert(QString::fromUtf8("ь").at(0), QString());
 	}
 	QHash<QChar, QString>::const_iterator j = fastLetterRusEng.constFind(letter);
 	if (j != fastLetterRusEng.cend()) {
@@ -776,16 +439,16 @@ QString translitLetterRusEng(QChar letter, QChar next, int32 &toSkip) {
 
 QString translitRusEng(const QString &rus) {
 	if (fastRusEng.isEmpty()) {
-		fastRusEng.insert(QString::fromUtf8("Александр"), qsl("Alexander"));
-		fastRusEng.insert(QString::fromUtf8("александр"), qsl("alexander"));
-		fastRusEng.insert(QString::fromUtf8("Филипп"), qsl("Philip"));
-		fastRusEng.insert(QString::fromUtf8("филипп"), qsl("philip"));
-		fastRusEng.insert(QString::fromUtf8("Пётр"), qsl("Petr"));
-		fastRusEng.insert(QString::fromUtf8("пётр"), qsl("petr"));
-		fastRusEng.insert(QString::fromUtf8("Гай"), qsl("Gai"));
-		fastRusEng.insert(QString::fromUtf8("гай"), qsl("gai"));
-		fastRusEng.insert(QString::fromUtf8("Ильин"), qsl("Ilyin"));
-		fastRusEng.insert(QString::fromUtf8("ильин"), qsl("ilyin"));
+		fastRusEng.insert(QString::fromUtf8("Александр"), u"Alexander"_q);
+		fastRusEng.insert(QString::fromUtf8("александр"), u"alexander"_q);
+		fastRusEng.insert(QString::fromUtf8("Филипп"), u"Philip"_q);
+		fastRusEng.insert(QString::fromUtf8("филипп"), u"philip"_q);
+		fastRusEng.insert(QString::fromUtf8("Пётр"), u"Petr"_q);
+		fastRusEng.insert(QString::fromUtf8("пётр"), u"petr"_q);
+		fastRusEng.insert(QString::fromUtf8("Гай"), u"Gai"_q);
+		fastRusEng.insert(QString::fromUtf8("гай"), u"gai"_q);
+		fastRusEng.insert(QString::fromUtf8("Ильин"), u"Ilyin"_q);
+		fastRusEng.insert(QString::fromUtf8("ильин"), u"ilyin"_q);
 	}
 	QMap<QString, QString>::const_iterator i = fastRusEng.constFind(rus);
 	if (i != fastRusEng.cend()) {
@@ -802,143 +465,38 @@ QString translitRusEng(const QString &rus) {
 	return result;
 }
 
-QString rusKeyboardLayoutSwitch(const QString &from) {
-	if (fastRusKeyboardSwitch.isEmpty()) {
-		fastRusKeyboardSwitch.insert('Q', QString::fromUtf8("Й").at(0));
-		fastRusKeyboardSwitch.insert('W', QString::fromUtf8("Ц").at(0));
-		fastRusKeyboardSwitch.insert('E', QString::fromUtf8("У").at(0));
-		fastRusKeyboardSwitch.insert('R', QString::fromUtf8("К").at(0));
-		fastRusKeyboardSwitch.insert('T', QString::fromUtf8("Е").at(0));
-		fastRusKeyboardSwitch.insert('Y', QString::fromUtf8("Н").at(0));
-		fastRusKeyboardSwitch.insert('U', QString::fromUtf8("Г").at(0));
-		fastRusKeyboardSwitch.insert('I', QString::fromUtf8("Ш").at(0));
-		fastRusKeyboardSwitch.insert('O', QString::fromUtf8("Щ").at(0));
-		fastRusKeyboardSwitch.insert('P', QString::fromUtf8("З").at(0));
-		fastRusKeyboardSwitch.insert('{', QString::fromUtf8("Х").at(0));
-		fastRusKeyboardSwitch.insert('}', QString::fromUtf8("Ъ").at(0));
-		fastRusKeyboardSwitch.insert('A', QString::fromUtf8("Ф").at(0));
-		fastRusKeyboardSwitch.insert('S', QString::fromUtf8("Ы").at(0));
-		fastRusKeyboardSwitch.insert('D', QString::fromUtf8("В").at(0));
-		fastRusKeyboardSwitch.insert('F', QString::fromUtf8("А").at(0));
-		fastRusKeyboardSwitch.insert('G', QString::fromUtf8("П").at(0));
-		fastRusKeyboardSwitch.insert('H', QString::fromUtf8("Р").at(0));
-		fastRusKeyboardSwitch.insert('J', QString::fromUtf8("О").at(0));
-		fastRusKeyboardSwitch.insert('K', QString::fromUtf8("Л").at(0));
-		fastRusKeyboardSwitch.insert('L', QString::fromUtf8("Д").at(0));
-		fastRusKeyboardSwitch.insert(':', QString::fromUtf8("Ж").at(0));
-		fastRusKeyboardSwitch.insert('"', QString::fromUtf8("Э").at(0));
-		fastRusKeyboardSwitch.insert('Z', QString::fromUtf8("Я").at(0));
-		fastRusKeyboardSwitch.insert('X', QString::fromUtf8("Ч").at(0));
-		fastRusKeyboardSwitch.insert('C', QString::fromUtf8("С").at(0));
-		fastRusKeyboardSwitch.insert('V', QString::fromUtf8("М").at(0));
-		fastRusKeyboardSwitch.insert('B', QString::fromUtf8("И").at(0));
-		fastRusKeyboardSwitch.insert('N', QString::fromUtf8("Т").at(0));
-		fastRusKeyboardSwitch.insert('M', QString::fromUtf8("Ь").at(0));
-		fastRusKeyboardSwitch.insert('<', QString::fromUtf8("Б").at(0));
-		fastRusKeyboardSwitch.insert('>', QString::fromUtf8("Ю").at(0));
-		fastRusKeyboardSwitch.insert('q', QString::fromUtf8("й").at(0));
-		fastRusKeyboardSwitch.insert('w', QString::fromUtf8("ц").at(0));
-		fastRusKeyboardSwitch.insert('e', QString::fromUtf8("у").at(0));
-		fastRusKeyboardSwitch.insert('r', QString::fromUtf8("к").at(0));
-		fastRusKeyboardSwitch.insert('t', QString::fromUtf8("е").at(0));
-		fastRusKeyboardSwitch.insert('y', QString::fromUtf8("н").at(0));
-		fastRusKeyboardSwitch.insert('u', QString::fromUtf8("г").at(0));
-		fastRusKeyboardSwitch.insert('i', QString::fromUtf8("ш").at(0));
-		fastRusKeyboardSwitch.insert('o', QString::fromUtf8("щ").at(0));
-		fastRusKeyboardSwitch.insert('p', QString::fromUtf8("з").at(0));
-		fastRusKeyboardSwitch.insert('[', QString::fromUtf8("х").at(0));
-		fastRusKeyboardSwitch.insert(']', QString::fromUtf8("ъ").at(0));
-		fastRusKeyboardSwitch.insert('a', QString::fromUtf8("ф").at(0));
-		fastRusKeyboardSwitch.insert('s', QString::fromUtf8("ы").at(0));
-		fastRusKeyboardSwitch.insert('d', QString::fromUtf8("в").at(0));
-		fastRusKeyboardSwitch.insert('f', QString::fromUtf8("а").at(0));
-		fastRusKeyboardSwitch.insert('g', QString::fromUtf8("п").at(0));
-		fastRusKeyboardSwitch.insert('h', QString::fromUtf8("р").at(0));
-		fastRusKeyboardSwitch.insert('j', QString::fromUtf8("о").at(0));
-		fastRusKeyboardSwitch.insert('k', QString::fromUtf8("л").at(0));
-		fastRusKeyboardSwitch.insert('l', QString::fromUtf8("д").at(0));
-		fastRusKeyboardSwitch.insert(';', QString::fromUtf8("ж").at(0));
-		fastRusKeyboardSwitch.insert('\'', QString::fromUtf8("э").at(0));
-		fastRusKeyboardSwitch.insert('z', QString::fromUtf8("я").at(0));
-		fastRusKeyboardSwitch.insert('x', QString::fromUtf8("ч").at(0));
-		fastRusKeyboardSwitch.insert('c', QString::fromUtf8("с").at(0));
-		fastRusKeyboardSwitch.insert('v', QString::fromUtf8("м").at(0));
-		fastRusKeyboardSwitch.insert('b', QString::fromUtf8("и").at(0));
-		fastRusKeyboardSwitch.insert('n', QString::fromUtf8("т").at(0));
-		fastRusKeyboardSwitch.insert('m', QString::fromUtf8("ь").at(0));
-		fastRusKeyboardSwitch.insert(',', QString::fromUtf8("б").at(0));
-		fastRusKeyboardSwitch.insert('.', QString::fromUtf8("ю").at(0));
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Й").at(0), 'Q');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Ц").at(0), 'W');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("У").at(0), 'E');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("К").at(0), 'R');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Е").at(0), 'T');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Н").at(0), 'Y');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Г").at(0), 'U');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Ш").at(0), 'I');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Щ").at(0), 'O');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("З").at(0), 'P');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Х").at(0), '{');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Ъ").at(0), '}');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Ф").at(0), 'A');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Ы").at(0), 'S');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("В").at(0), 'D');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("А").at(0), 'F');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("П").at(0), 'G');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Р").at(0), 'H');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("О").at(0), 'J');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Л").at(0), 'K');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Д").at(0), 'L');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Ж").at(0), ':');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Э").at(0), '"');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Я").at(0), 'Z');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Ч").at(0), 'X');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("С").at(0), 'C');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("М").at(0), 'V');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("И").at(0), 'B');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Т").at(0), 'N');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Ь").at(0), 'M');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Б").at(0), '<');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("Ю").at(0), '>');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("й").at(0), 'q');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("ц").at(0), 'w');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("у").at(0), 'e');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("к").at(0), 'r');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("е").at(0), 't');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("н").at(0), 'y');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("г").at(0), 'u');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("ш").at(0), 'i');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("щ").at(0), 'o');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("з").at(0), 'p');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("х").at(0), '[');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("ъ").at(0), ']');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("ф").at(0), 'a');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("ы").at(0), 's');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("в").at(0), 'd');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("а").at(0), 'f');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("п").at(0), 'g');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("р").at(0), 'h');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("о").at(0), 'j');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("л").at(0), 'k');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("д").at(0), 'l');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("ж").at(0), ';');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("э").at(0), '\'');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("я").at(0), 'z');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("ч").at(0), 'x');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("с").at(0), 'c');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("м").at(0), 'v');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("и").at(0), 'b');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("т").at(0), 'n');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("ь").at(0), 'm');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("б").at(0), ',');
-		fastRusKeyboardSwitch.insert(QString::fromUtf8("ю").at(0), '.');
-	}
+QString engAlphabet = "qwertyuiop[]asdfghjkl;'zxcvbnm,.";
+QString engAlphabetUpper = engAlphabet.toUpper();
 
+void initializeKeyboardSwitch() {
+	if (fastRusKeyboardSwitch.isEmpty()) {
+		QString rusAlphabet = "йцукенгшщзхъфывапролджэячсмитьбю";
+		QString rusAlphabetUpper = rusAlphabet.toUpper();
+		for (int i = 0; i < rusAlphabet.size(); ++i) {
+			fastRusKeyboardSwitch.insert(engAlphabetUpper[i], rusAlphabetUpper[i]);
+			fastRusKeyboardSwitch.insert(engAlphabet[i], rusAlphabet[i]);
+			fastRusKeyboardSwitch.insert(rusAlphabetUpper[i], engAlphabetUpper[i]);
+			fastRusKeyboardSwitch.insert(rusAlphabet[i], engAlphabet[i]);
+		}
+	}
+	if (fastUkrKeyboardSwitch.isEmpty()) {
+		QString ukrAlphabet = "йцукенгшщзхїфівапролджєячсмитьбю";
+		QString ukrAlphabetUpper = ukrAlphabet.toUpper();
+		for (int i = 0; i < ukrAlphabet.size(); ++i) {
+			fastUkrKeyboardSwitch.insert(engAlphabetUpper[i], ukrAlphabetUpper[i]);
+			fastUkrKeyboardSwitch.insert(engAlphabet[i], ukrAlphabet[i]);
+			fastUkrKeyboardSwitch.insert(ukrAlphabetUpper[i], engAlphabetUpper[i]);
+			fastUkrKeyboardSwitch.insert(ukrAlphabet[i], engAlphabet[i]);
+		}
+	}
+}
+
+QString switchKeyboardLayout(const QString& from, QHash<QChar, QChar>& keyboardSwitch) {
 	QString result;
 	result.reserve(from.size());
 	for (QString::const_iterator i = from.cbegin(), e = from.cend(); i != e; ++i) {
-		QHash<QChar, QChar>::const_iterator j = fastRusKeyboardSwitch.constFind(*i);
-		if (j == fastRusKeyboardSwitch.cend()) {
+		QHash<QChar, QChar>::const_iterator j = keyboardSwitch.constFind(*i);
+		if (j == keyboardSwitch.cend()) {
 			result += *i;
 		} else {
 			result += j.value();
@@ -947,75 +505,9 @@ QString rusKeyboardLayoutSwitch(const QString &from) {
 	return result;
 }
 
-QStringList MimeType::globPatterns() const {
-	switch (_type) {
-	case Known::WebP: return QStringList(qsl("*.webp"));
-	case Known::TDesktopTheme: return QStringList(qsl("*.tdesktop-theme"));
-	case Known::TDesktopPalette: return QStringList(qsl("*.tdesktop-palette"));
-	default: break;
-	}
-	return _typeStruct.globPatterns();
-}
-QString MimeType::filterString() const {
-	switch (_type) {
-	case Known::WebP: return qsl("WebP image (*.webp)");
-	case Known::TDesktopTheme: return qsl("Theme files (*.tdesktop-theme)");
-	case Known::TDesktopPalette: return qsl("Palette files (*.tdesktop-palette)");
-	default: break;
-	}
-	return _typeStruct.filterString();
-}
-QString MimeType::name() const {
-	switch (_type) {
-	case Known::WebP: return qsl("image/webp");
-	case Known::TDesktopTheme: return qsl("application/x-tdesktop-theme");
-	case Known::TDesktopPalette: return qsl("application/x-tdesktop-palette");
-	default: break;
-	}
-	return _typeStruct.name();
-}
-
-MimeType mimeTypeForName(const QString &mime) {
-	if (mime == qsl("image/webp")) {
-		return MimeType(MimeType::Known::WebP);
-	} else if (mime == qsl("application/x-tdesktop-theme")) {
-		return MimeType(MimeType::Known::TDesktopTheme);
-	} else if (mime == qsl("application/x-tdesktop-palette")) {
-		return MimeType(MimeType::Known::TDesktopPalette);
-	}
-	return MimeType(QMimeDatabase().mimeTypeForName(mime));
-}
-
-MimeType mimeTypeForFile(const QFileInfo &file) {
-	QString path = file.absoluteFilePath();
-	if (path.endsWith(qstr(".webp"), Qt::CaseInsensitive)) {
-		return MimeType(MimeType::Known::WebP);
-	} else if (path.endsWith(qstr(".tdesktop-theme"), Qt::CaseInsensitive)) {
-		return MimeType(MimeType::Known::TDesktopTheme);
-	} else if (path.endsWith(qstr(".tdesktop-palette"), Qt::CaseInsensitive)) {
-		return MimeType(MimeType::Known::TDesktopPalette);
-	}
-
-	{
-		QFile f(path);
-		if (f.open(QIODevice::ReadOnly)) {
-			QByteArray magic = f.read(12);
-			if (magic.size() >= 12) {
-				if (!memcmp(magic.constData(), "RIFF", 4) && !memcmp(magic.constData() + 8, "WEBP", 4)) {
-					return MimeType(MimeType::Known::WebP);
-				}
-			}
-			f.close();
-		}
-	}
-	return MimeType(QMimeDatabase().mimeTypeForFile(file));
-}
-
-MimeType mimeTypeForData(const QByteArray &data) {
-	if (data.size() >= 12) {
-		if (!memcmp(data.constData(), "RIFF", 4) && !memcmp(data.constData() + 8, "WEBP", 4)) {
-			return MimeType(MimeType::Known::WebP);
-		}
-	}
-	return MimeType(QMimeDatabase().mimeTypeForData(data));
+QString rusKeyboardLayoutSwitch(const QString& from) {
+	initializeKeyboardSwitch();
+	QString rus = switchKeyboardLayout(from, fastRusKeyboardSwitch);
+	QString ukr = switchKeyboardLayout(from, fastUkrKeyboardSwitch);
+	return rus == ukr ? rus : rus + ' ' + ukr;
 }

@@ -1,27 +1,15 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "platform/platform_main_window.h"
 #include "base/flags.h"
+
 #include <windows.h>
 
 namespace Ui {
@@ -31,102 +19,92 @@ class PopupMenu;
 namespace Platform {
 
 class MainWindow : public Window::MainWindow {
-	Q_OBJECT
-
 public:
-	MainWindow();
+	explicit MainWindow(not_null<Window::Controller*> controller);
 
 	HWND psHwnd() const;
-	HMENU psMenu() const;
 
-	void psFirstShow();
-	void psInitSysMenu();
-	void updateSystemMenu(Qt::WindowState state);
-	void psUpdateMargins();
-
-	void psRefreshTaskbarIcon();
-
-	virtual QImage iconWithCounter(int size, int count, style::color bg, style::color fg, bool smallIcon) = 0;
-
-	static UINT TaskbarCreatedMsgId() {
-		return _taskbarCreatedMsgId;
-	}
-	static void TaskbarCreated();
+	void updateWindowIcon() override;
+	bool isActiveForTrayMenu() override;
 
 	// Custom shadows.
-	enum class ShadowsChange {
-		Moved    = (1 << 0),
-		Resized  = (1 << 1),
-		Shown    = (1 << 2),
-		Hidden   = (1 << 3),
-		Activate = (1 << 4),
-	};
-	using ShadowsChanges = base::flags<ShadowsChange>;
-	friend inline constexpr auto is_flag_type(ShadowsChange) { return true; };
-
-	bool shadowsWorking() const {
-		return _shadowsWorking;
-	}
 	void shadowsActivate();
 	void shadowsDeactivate();
-	void shadowsUpdate(ShadowsChanges changes, WINDOWPOS *position = nullptr);
 
-	int deltaLeft() const {
-		return _deltaLeft;
-	}
-	int deltaTop() const {
-		return _deltaTop;
-	}
+	[[nodiscard]] bool hasTabletView() const;
+
+	void destroyedFromSystem();
+
+	bool setDwmThumbnail(QSize size);
+	bool setDwmPreview(QSize size, int radius);
 
 	~MainWindow();
 
-public slots:
-	void psShowTrayMenu();
-
 protected:
 	void initHook() override;
-	int32 screenNameChecksum(const QString &name) const override;
 	void unreadCounterChangedHook() override;
 
-	void stateChangedHook(Qt::WindowState state) override;
+	void workmodeUpdated(Core::Settings::WorkMode mode) override;
 
-	bool hasTrayIcon() const override {
-		return trayIcon;
-	}
+	bool initGeometryFromSystem() override;
 
-	QSystemTrayIcon *trayIcon = nullptr;
-	Ui::PopupMenu *trayIconMenu = nullptr;
-
-	void psTrayMenuUpdated();
-	void psSetupTrayIcon();
-	virtual void placeSmallCounter(QImage &img, int size, int count, style::color bg, const QPoint &shift, style::color color) = 0;
-
-	void showTrayTooltip() override;
-
-	void workmodeUpdated(DBIWorkMode mode) override;
-
-	QTimer psUpdatedPositionTimer;
+	bool nativeEvent(
+		const QByteArray &eventType,
+		void *message,
+		native_event_filter_result *result) override;
 
 private:
-	void updateIconCounters();
+	struct Private;
 
-	void psDestroyIcons();
+	class BitmapPointer {
+	public:
+		BitmapPointer(HBITMAP value = nullptr);
+		BitmapPointer(BitmapPointer &&other);
+		BitmapPointer& operator=(BitmapPointer &&other);
+		~BitmapPointer();
 
-	static UINT _taskbarCreatedMsgId;
+		[[nodiscard]] HBITMAP get() const;
+		[[nodiscard]] explicit operator bool() const;
 
-	bool _shadowsWorking = false;
-	bool _themeInited = false;
+		void release();
+		void reset(HBITMAP value = nullptr);
 
-	HWND ps_hWnd = nullptr;
-	HWND ps_tbHider_hWnd = nullptr;
-	HMENU ps_menu = nullptr;
-	HICON ps_iconBig = nullptr;
-	HICON ps_iconSmall = nullptr;
-	HICON ps_iconOverlay = nullptr;
+	private:
+		HBITMAP _value = nullptr;
 
-	int _deltaLeft = 0;
-	int _deltaTop = 0;
+	};
+
+	void setupNativeWindowFrame();
+	void setupPreviewPasscodeLock();
+	void updateTaskbarAndIconCounters();
+	void validateWindowTheme(bool native, bool night);
+
+	void forceIconRefresh();
+	void destroyCachedIcons();
+	void validateDwmPreviewColors();
+
+	const std::unique_ptr<Private> _private;
+	const std::unique_ptr<QWindow> _taskbarHiderWindow;
+
+	HWND _hWnd = nullptr;
+	HICON _iconBig = nullptr;
+	HICON _iconSmall = nullptr;
+	HICON _iconOverlay = nullptr;
+
+	BitmapPointer _dwmThumbnail;
+	BitmapPointer _dwmPreview;
+	QSize _dwmThumbnailSize;
+	QSize _dwmPreviewSize;
+	QColor _dwmBackground;
+	int _dwmPreviewRadius = 0;
+
+	// Workarounds for activation from tray icon.
+	crl::time _lastDeactivateTime = 0;
+
+	bool _hasActiveFrame = false;
 
 };
+
+[[nodiscard]] int32 ScreenNameChecksum(const QString &name);
 
 } // namespace Platform

@@ -67,26 +67,30 @@ exit /b %errorlevel%
   set "CommandPath=%1"
   set "CommandPathUnix=!CommandPath:\=/!"
   set "CommandPathWin=!CommandPath:/=\!"
-
+  if "!CommandPathUnix:~-4!" == "_mac" (
+    set "CommandExt=mm"
+  ) else (
+    set "CommandExt=cpp"
+  )
   if "!CommandPathUnix!" == "" (
     echo Provide source path.
     exit /b 1
-  ) else if exist "SourceFiles\!CommandPathWin!.cpp" (
+  ) else if exist "SourceFiles\!CommandPathWin!.!CommandExt!" (
     echo This source already exists.
     exit /b 1
   )
-  echo Generating source !CommandPathUnix!.cpp..
-  mkdir "SourceFiles\!CommandPathWin!.cpp"
-  rmdir "SourceFiles\!CommandPathWin!.cpp"
+  echo Generating source !CommandPathUnix!.!CommandExt!..
+  mkdir "SourceFiles\!CommandPathWin!.!CommandExt!"
+  rmdir "SourceFiles\!CommandPathWin!.!CommandExt!"
 
-  call :write_comment !CommandPathWin!.cpp
+  call :write_comment !CommandPathWin!.!CommandExt!
   set "quote="""
   set "quote=!quote:~0,1!"
   set "source1=#include !quote!!CommandPathUnix!.h!quote!"
   (
     echo !source1!
     echo.
-  )>> "SourceFiles\!CommandPathWin!.cpp"
+  )>> "SourceFiles\!CommandPathWin!.!CommandExt!"
   exit /b
 )
 
@@ -124,23 +128,10 @@ exit /b %errorlevel%
   (
     echo /*
     echo This file is part of Telegram Desktop,
-    echo the official desktop version of Telegram messaging app, see https://telegram.org
+    echo the official desktop application for the Telegram messaging service.
     echo.
-    echo Telegram Desktop is free software: you can redistribute it and/or modify
-    echo it under the terms of the GNU General Public License as published by
-    echo the Free Software Foundation, either version 3 of the License, or
-    echo ^(at your option^) any later version.
-    echo.
-    echo It is distributed in the hope that it will be useful,
-    echo but WITHOUT ANY WARRANTY; without even the implied warranty of
-    echo MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-    echo GNU General Public License for more details.
-    echo.
-    echo In addition, as a special exception, the copyright holders give permission
-    echo to link the code of portions of this program with the OpenSSL library.
-    echo.
-    echo Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-    echo Copyright ^(c^) 2014-2017 John Preston, https://desktop.telegram.org
+    echo For license and copyright information please follow this link:
+    echo https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
     echo */
   )> "SourceFiles\!Path!"
   exit /b

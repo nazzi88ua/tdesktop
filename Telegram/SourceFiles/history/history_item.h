@@ -1,1076 +1,720 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
 #include "base/runtime_composer.h"
-#include "base/flags.h"
+#include "data/data_media_types.h"
+#include "history/history_item_edition.h"
 
-namespace Ui {
-class RippleAnimation;
-} // namespace Ui
+#include <any>
 
-namespace style {
-struct BotKeyboardButton;
-struct RippleAnimation;
-} // namespace style
+class HiddenSenderInfo;
+class History;
 
-class HistoryElement {
-public:
-	HistoryElement() = default;
-	HistoryElement(const HistoryElement &other) = delete;
-	HistoryElement &operator=(const HistoryElement &other) = delete;
-
-	int maxWidth() const {
-		return _maxw;
-	}
-	int minHeight() const {
-		return _minh;
-	}
-	int height() const {
-		return _height;
-	}
-
-	virtual ~HistoryElement() = default;
-
-protected:
-	mutable int _maxw = 0;
-	mutable int _minh = 0;
-	mutable int _height = 0;
-
-};
-
-class HistoryMessage;
-
-enum HistoryCursorState {
-	HistoryDefaultCursorState,
-	HistoryInTextCursorState,
-	HistoryInDateCursorState,
-	HistoryInForwardedCursorState,
-};
-
-struct HistoryTextState {
-	HistoryTextState() = default;
-	HistoryTextState(const Text::StateResult &state)
-		: cursor(state.uponSymbol ? HistoryInTextCursorState : HistoryDefaultCursorState)
-		, link(state.link)
-		, afterSymbol(state.afterSymbol)
-		, symbol(state.symbol) {
-	}
-	HistoryTextState &operator=(const Text::StateResult &state) {
-		cursor = state.uponSymbol ? HistoryInTextCursorState : HistoryDefaultCursorState;
-		link = state.link;
-		afterSymbol = state.afterSymbol;
-		symbol = state.symbol;
-		return *this;
-	}
-	HistoryCursorState cursor = HistoryDefaultCursorState;
-	ClickHandlerPtr link;
-	bool afterSymbol = false;
-	uint16 symbol = 0;
-};
-
-struct HistoryStateRequest {
-	Text::StateRequest::Flags flags = Text::StateRequest::Flag::LookupLink;
-	Text::StateRequest forText() const {
-		Text::StateRequest result;
-		result.flags = flags;
-		return result;
-	}
-};
-
-enum InfoDisplayType {
-	InfoDisplayDefault,
-	InfoDisplayOverImage,
-	InfoDisplayOverBackground,
-};
-
-struct HistoryMessageVia : public RuntimeComponent<HistoryMessageVia> {
-	void create(int32 userId);
-	void resize(int32 availw) const;
-
-	UserData *_bot = nullptr;
-	mutable QString _text;
-	mutable int _width = 0;
-	mutable int _maxWidth = 0;
-	ClickHandlerPtr _lnk;
-};
-
-struct HistoryMessageViews : public RuntimeComponent<HistoryMessageViews> {
-	QString _viewsText;
-	int _views = 0;
-	int _viewsWidth = 0;
-};
-
-struct HistoryMessageSigned : public RuntimeComponent<HistoryMessageSigned> {
-	void create(const QString &author, const QString &date);
-	int maxWidth() const;
-
-	QString _author;
-	Text _signature;
-};
-
-struct HistoryMessageEdited : public RuntimeComponent<HistoryMessageEdited> {
-	void create(const QDateTime &editDate, const QString &date);
-	int maxWidth() const;
-
-	QDateTime _editDate;
-	Text _edited;
-};
-
-struct HistoryMessageForwarded : public RuntimeComponent<HistoryMessageForwarded> {
-	void create(const HistoryMessageVia *via) const;
-
-	QDateTime _originalDate;
-	PeerData *_originalSender = nullptr;
-	QString _originalAuthor;
-	MsgId _originalId = 0;
-	mutable Text _text = { 1 };
-};
-
-struct HistoryMessageReply : public RuntimeComponent<HistoryMessageReply> {
-	HistoryMessageReply &operator=(HistoryMessageReply &&other) {
-		replyToMsgId = other.replyToMsgId;
-		std::swap(replyToMsg, other.replyToMsg);
-		replyToLnk = std::move(other.replyToLnk);
-		replyToName = std::move(other.replyToName);
-		replyToText = std::move(other.replyToText);
-		replyToVersion = other.replyToVersion;
-		_maxReplyWidth = other._maxReplyWidth;
-		_replyToVia = std::move(other._replyToVia);
-		return *this;
-	}
-	~HistoryMessageReply() {
-		// clearData() should be called by holder
-		Expects(replyToMsg == nullptr);
-		Expects(_replyToVia == nullptr);
-	}
-
-	bool updateData(HistoryMessage *holder, bool force = false);
-	void clearData(HistoryMessage *holder); // must be called before destructor
-
-	bool isNameUpdated() const;
-	void updateName() const;
-	void resize(int width) const;
-	void itemRemoved(HistoryMessage *holder, HistoryItem *removed);
-
-	enum class PaintFlag {
-		InBubble = (1 << 0),
-		Selected = (1 << 1),
-	};
-	using PaintFlags = base::flags<PaintFlag>;
-	friend inline constexpr auto is_flag_type(PaintFlag) { return true; };
-	void paint(Painter &p, const HistoryItem *holder, int x, int y, int w, PaintFlags flags) const;
-
-	MsgId replyToId() const {
-		return replyToMsgId;
-	}
-	int replyToWidth() const {
-		return _maxReplyWidth;
-	}
-	ClickHandlerPtr replyToLink() const {
-		return replyToLnk;
-	}
-
-	MsgId replyToMsgId = 0;
-	HistoryItem *replyToMsg = nullptr;
-	ClickHandlerPtr replyToLnk;
-	mutable Text replyToName, replyToText;
-	mutable int replyToVersion = 0;
-	mutable int _maxReplyWidth = 0;
-	std::unique_ptr<HistoryMessageVia> _replyToVia;
-	int toWidth = 0;
-};
-
+struct HistoryMessageReply;
+struct HistoryMessageViews;
+struct HistoryMessageMarkupData;
+struct HistoryMessageReplyMarkup;
+struct HistoryMessageTranslation;
+struct HistoryMessageForwarded;
+struct HistoryMessageSuggestedPost;
+struct HistoryServiceDependentData;
+struct HistoryServiceTodoCompletions;
+enum class HistorySelfDestructType;
+struct PreparedServiceText;
+struct MessageFactcheck;
 class ReplyKeyboard;
-struct HistoryMessageReplyMarkup : public RuntimeComponent<HistoryMessageReplyMarkup> {
-	HistoryMessageReplyMarkup() = default;
-	HistoryMessageReplyMarkup(MTPDreplyKeyboardMarkup::Flags f) : flags(f) {
-	}
+struct LanguageId;
+enum class SuggestionActions : uchar;
 
-	void create(const MTPReplyMarkup &markup);
-	void create(const HistoryMessageReplyMarkup &markup);
+namespace base {
+template <typename Enum>
+class enum_mask;
+} // namespace base
 
-	struct Button {
-		enum class Type {
-			Default,
-			Url,
-			Callback,
-			RequestPhone,
-			RequestLocation,
-			SwitchInline,
-			SwitchInlineSame,
-			Game,
-			Buy,
-		};
-		Type type;
-		QString text;
-		QByteArray data;
-		mutable mtpRequestId requestId;
-	};
-	using ButtonRow = QVector<Button>;
-	using ButtonRows = QVector<ButtonRow>;
+namespace Storage {
+enum class SharedMediaType : signed char;
+using SharedMediaTypesMask = base::enum_mask<SharedMediaType>;
+} // namespace Storage
 
-	ButtonRows rows;
-	MTPDreplyKeyboardMarkup::Flags flags = 0;
+namespace Data {
+struct MessagePosition;
+struct RecentReaction;
+struct MessageReactionsTopPaid;
+struct ReactionId;
+class Media;
+struct MessageReaction;
+class MessageReactions;
+class ForumTopic;
+class Thread;
+struct SponsoredFrom;
+class Story;
+class SavedSublist;
+struct PaidReactionSend;
+struct SendError;
+} // namespace Data
 
-	std::unique_ptr<ReplyKeyboard> inlineKeyboard;
+namespace HistoryUnreadThings {
+enum class AddType;
+} // namespace HistoryUnreadThings
 
-	// If >= 0 it holds the y coord of the inlineKeyboard before the last edition.
-	int oldTop = -1;
+namespace HistoryView {
+class ElementDelegate;
+class Element;
+class Message;
+class Service;
+class ServiceMessagePainter;
+} // namespace HistoryView
 
-private:
-	void createFromButtonRows(const QVector<MTPKeyboardButtonRow> &v);
-
+struct HistoryItemCommonFields {
+	MsgId id = 0;
+	MessageFlags flags = 0;
+	PeerId from = 0;
+	FullReplyTo replyTo;
+	TimeId date = 0;
+	BusinessShortcutId shortcutId = 0;
+	int starsPaid = 0;
+	UserId viaBotId = 0;
+	QString postAuthor;
+	uint64 groupedId = 0;
+	EffectId effectId = 0;
+	HistoryMessageMarkupData markup;
+	HistoryMessageSuggestInfo suggest;
+	bool ignoreForwardFrom = false;
+	bool ignoreForwardCaptions = false;
 };
 
-class ReplyMarkupClickHandler : public LeftButtonClickHandler {
+enum class HistoryReactionSource : char {
+	Selector,
+	Quick,
+	Existing,
+};
+
+enum class PaidPostType : uchar {
+	None,
+	Stars,
+	Ton,
+};
+
+class HistoryItem final : public RuntimeComposer<HistoryItem> {
 public:
-	ReplyMarkupClickHandler(const HistoryItem *item, int row, int col);
+	[[nodiscard]] static std::unique_ptr<Data::Media> CreateMedia(
+		not_null<HistoryItem*> item,
+		const MTPMessageMedia &media);
 
-	QString tooltip() const override {
-		return _fullDisplayed ? QString() : buttonText();
-	}
-
-	void setFullDisplayed(bool full) {
-		_fullDisplayed = full;
-	}
-
-	// Copy to clipboard support.
-	void copyToClipboard() const override;
-	QString copyToClipboardContextItemText() const override;
-
-	// Finds the corresponding button in the items markup struct.
-	// If the button is not found it returns nullptr.
-	// Note: it is possible that we will point to the different button
-	// than the one was used when constructing the handler, but not a big deal.
-	const HistoryMessageReplyMarkup::Button *getButton() const;
-
-	// We hold only FullMsgId, not HistoryItem*, because all click handlers
-	// are activated async and the item may be already destroyed.
-	void setMessageId(const FullMsgId &msgId) {
-		_itemId = msgId;
-	}
-
-protected:
-	void onClickImpl() const override;
-
-private:
-	FullMsgId _itemId;
-	int _row, _col;
-	bool _fullDisplayed = true;
-
-	// Returns the full text of the corresponding button.
-	QString buttonText() const;
-
-};
-
-class ReplyKeyboard {
-private:
-	struct Button;
-
-public:
-	class Style {
-	public:
-		Style(const style::BotKeyboardButton &st) : _st(&st) {
-		}
-
-		virtual void startPaint(Painter &p) const = 0;
-		virtual const style::TextStyle &textStyle() const = 0;
-
-		int buttonSkip() const;
-		int buttonPadding() const;
-		int buttonHeight() const;
-		virtual int buttonRadius() const = 0;
-
-		virtual void repaint(not_null<const HistoryItem*> item) const = 0;
-		virtual ~Style() {
-		}
-
-	protected:
-		virtual void paintButtonBg(Painter &p, const QRect &rect, float64 howMuchOver) const = 0;
-		virtual void paintButtonIcon(Painter &p, const QRect &rect, int outerWidth, HistoryMessageReplyMarkup::Button::Type type) const = 0;
-		virtual void paintButtonLoading(Painter &p, const QRect &rect) const = 0;
-		virtual int minButtonWidth(HistoryMessageReplyMarkup::Button::Type type) const = 0;
-
-	private:
-		const style::BotKeyboardButton *_st;
-
-		void paintButton(Painter &p, int outerWidth, const ReplyKeyboard::Button &button, TimeMs ms) const;
-		friend class ReplyKeyboard;
-
-	};
-	typedef std::unique_ptr<Style> StylePtr;
-
-	ReplyKeyboard(const HistoryItem *item, StylePtr &&s);
-	ReplyKeyboard(const ReplyKeyboard &other) = delete;
-	ReplyKeyboard &operator=(const ReplyKeyboard &other) = delete;
-
-	bool isEnoughSpace(int width, const style::BotKeyboardButton &st) const;
-	void setStyle(StylePtr &&s);
-	void resize(int width, int height);
-
-	// what width and height will best fit this keyboard
-	int naturalWidth() const;
-	int naturalHeight() const;
-
-	void paint(Painter &p, int outerWidth, const QRect &clip, TimeMs ms) const;
-	ClickHandlerPtr getState(QPoint point) const;
-
-	void clickHandlerActiveChanged(const ClickHandlerPtr &p, bool active);
-	void clickHandlerPressedChanged(const ClickHandlerPtr &p, bool pressed);
-
-	void clearSelection();
-	void updateMessageId();
-
-private:
-	void startAnimation(int i, int j, int direction);
-
-	friend class Style;
-	using ReplyMarkupClickHandlerPtr = QSharedPointer<ReplyMarkupClickHandler>;
-	struct Button {
-		Text text = { 1 };
-		QRect rect;
-		int characters = 0;
-		float64 howMuchOver = 0.;
-		HistoryMessageReplyMarkup::Button::Type type;
-		ReplyMarkupClickHandlerPtr link;
-		mutable QSharedPointer<Ui::RippleAnimation> ripple;
-	};
-	using ButtonRow = QVector<Button>;
-	using ButtonRows = QVector<ButtonRow>;
-
-	struct ButtonCoords {
-		int i, j;
-	};
-	ButtonCoords findButtonCoordsByClickHandler(const ClickHandlerPtr &p);
-
-	using Animations = QMap<int, TimeMs>;
-	void step_selected(TimeMs ms, bool timer);
-
-	const HistoryItem *_item;
-	int _width = 0;
-
-	ButtonRows _rows;
-
-	Animations _animations;
-	BasicAnimation _a_selected;
-
-	StylePtr _st;
-
-	ClickHandlerPtr _savedPressed;
-	ClickHandlerPtr _savedActive;
-	mutable QPoint _savedCoords;
-
-};
-
-// Any HistoryItem can have this Component for
-// displaying the day mark above the message.
-struct HistoryMessageDate : public RuntimeComponent<HistoryMessageDate> {
-	void init(const QDateTime &date);
-
-	int height() const;
-	void paint(Painter &p, int y, int w) const;
-
-	QString _text;
-	int _width = 0;
-};
-
-// Any HistoryItem can have this Component for
-// displaying the unread messages bar above the message.
-struct HistoryMessageUnreadBar : public RuntimeComponent<HistoryMessageUnreadBar> {
-	void init(int count);
-
-	static int height();
-	static int marginTop();
-
-	void paint(Painter &p, int y, int w) const;
-
-	QString _text;
-	int _width = 0;
-
-	// If unread bar is freezed the new messages do not
-	// increment the counter displayed by this bar.
-	//
-	// It happens when we've opened the conversation and
-	// we've seen the bar and new messages are marked as read
-	// as soon as they are added to the chat history.
-	bool _freezed = false;
-
-};
-
-class HistoryWebPage;
-
-// Special type of Component for the channel actions log.
-struct HistoryMessageLogEntryOriginal : public RuntimeComponent<HistoryMessageLogEntryOriginal> {
-	HistoryMessageLogEntryOriginal();
-	HistoryMessageLogEntryOriginal(HistoryMessageLogEntryOriginal &&other);
-	HistoryMessageLogEntryOriginal &operator=(HistoryMessageLogEntryOriginal &&other);
-	~HistoryMessageLogEntryOriginal();
-
-	std::unique_ptr<HistoryWebPage> _page;
-
-};
-
-// HistoryMedia has a special owning smart pointer
-// which regs/unregs this media to the holding HistoryItem
-class HistoryMedia;
-class HistoryMediaPtr {
-public:
-	HistoryMediaPtr();
-	HistoryMediaPtr(const HistoryMediaPtr &other) = delete;
-	HistoryMediaPtr &operator=(const HistoryMediaPtr &other) = delete;
-	HistoryMediaPtr(std::unique_ptr<HistoryMedia> other);
-	HistoryMediaPtr &operator=(std::unique_ptr<HistoryMedia> other);
-
-	HistoryMedia *get() const {
-		return _pointer.get();
-	}
-	void reset(std::unique_ptr<HistoryMedia> pointer = nullptr);
-	bool isNull() const {
-		return !_pointer;
-	}
-
-	HistoryMedia *operator->() const {
-		return get();
-	}
-	HistoryMedia &operator*() const {
-		Expects(!isNull());
-		return *get();
-	}
-	explicit operator bool() const {
-		return !isNull();
-	}
-	~HistoryMediaPtr();
-
-private:
-	std::unique_ptr<HistoryMedia> _pointer;
-
-};
-
-namespace internal {
-
-TextSelection unshiftSelection(TextSelection selection, uint16 byLength);
-TextSelection shiftSelection(TextSelection selection, uint16 byLength);
-inline TextSelection unshiftSelection(TextSelection selection, const Text &byText) {
-	return ::internal::unshiftSelection(selection, byText.length());
-}
-inline TextSelection shiftSelection(TextSelection selection, const Text &byText) {
-	return ::internal::shiftSelection(selection, byText.length());
-}
-
-} // namespace internal
-
-class HistoryItem : public HistoryElement, public RuntimeComposer, public ClickHandlerHost {
-public:
-	int resizeGetHeight(int newWidth) {
-		if (_flags & MTPDmessage_ClientFlag::f_pending_init_dimensions) {
-			_flags &= ~MTPDmessage_ClientFlag::f_pending_init_dimensions;
-			initDimensions();
-		}
-		if (_flags & MTPDmessage_ClientFlag::f_pending_resize) {
-			_flags &= ~MTPDmessage_ClientFlag::f_pending_resize;
-		}
-		_width = newWidth;
-		return resizeContentGetHeight();
-	}
-	virtual void draw(Painter &p, QRect clip, TextSelection selection, TimeMs ms) const = 0;
-
-	virtual void dependencyItemRemoved(HistoryItem *dependency) {
-	}
-	virtual bool updateDependencyItem() {
-		return true;
-	}
-	virtual MsgId dependencyMsgId() const {
-		return 0;
-	}
-	virtual bool notificationReady() const {
-		return true;
-	}
-
-	UserData *viaBot() const {
-		if (auto via = Get<HistoryMessageVia>()) {
-			return via->_bot;
-		}
-		return nullptr;
-	}
-	UserData *getMessageBot() const {
-		if (auto bot = viaBot()) {
-			return bot;
-		}
-		auto bot = from()->asUser();
-		if (!bot) {
-			bot = history()->peer->asUser();
-		}
-		return (bot && bot->botInfo) ? bot : nullptr;
-	};
-
-	bool isLogEntry() const {
-		return (id > ServerMaxMsgId);
-	}
-	void addLogEntryOriginal(WebPageId localId, const QString &label, const TextWithEntities &content);
-
-	not_null<History*> history() const {
-		return _history;
-	}
-	PeerData *from() const {
-		return _from;
-	}
-	HistoryBlock *block() {
-		return _block;
-	}
-	const HistoryBlock *block() const {
-		return _block;
-	}
-	void destroy();
-	void detach();
-	void detachFast();
-	bool detached() const {
-		return !_block;
-	}
-	void attachToBlock(HistoryBlock *block, int index) {
-		Expects(!isLogEntry());
-		Expects(_block == nullptr);
-		Expects(_indexInBlock < 0);
-		Expects(block != nullptr);
-		Expects(index >= 0);
-
-		_block = block;
-		_indexInBlock = index;
-		setPendingResize();
-	}
-	void setIndexInBlock(int index) {
-		Expects(_block != nullptr);
-		Expects(index >= 0);
-
-		_indexInBlock = index;
-	}
-	int indexInBlock() const {
-		Expects((_indexInBlock >= 0) == (_block != nullptr));
-		Expects((_block == nullptr) || (_block->items[_indexInBlock] == this));
-
-		return _indexInBlock;
-	}
-	bool out() const {
-		return _flags & MTPDmessage::Flag::f_out;
-	}
-	bool unread() const;
-	bool mentionsMe() const {
-		return _flags & MTPDmessage::Flag::f_mentioned;
-	}
-	bool isMediaUnread() const {
-		return _flags & MTPDmessage::Flag::f_media_unread;
-	}
-	void markMediaRead();
-
-	// Zero result means this message is not self-destructing right now.
-	virtual TimeMs getSelfDestructIn(TimeMs now) {
-		return 0;
-	}
-
-	bool definesReplyKeyboard() const {
-		if (auto markup = Get<HistoryMessageReplyMarkup>()) {
-			if (markup->flags & MTPDreplyKeyboardMarkup_ClientFlag::f_inline) {
-				return false;
-			}
-			return true;
-		}
-
-		// optimization: don't create markup component for the case
-		// MTPDreplyKeyboardHide with flags = 0, assume it has f_zero flag
-		return (_flags & MTPDmessage::Flag::f_reply_markup);
-	}
-	MTPDreplyKeyboardMarkup::Flags replyKeyboardFlags() const {
-		Expects(definesReplyKeyboard());
-		if (auto markup = Get<HistoryMessageReplyMarkup>()) {
-			return markup->flags;
-		}
-
-		// optimization: don't create markup component for the case
-		// MTPDreplyKeyboardHide with flags = 0, assume it has f_zero flag
-		return MTPDreplyKeyboardMarkup_ClientFlag::f_zero | 0;
-	}
-	bool hasSwitchInlineButton() const {
-		return _flags & MTPDmessage_ClientFlag::f_has_switch_inline_button;
-	}
-	bool hasTextLinks() const {
-		return _flags & MTPDmessage_ClientFlag::f_has_text_links;
-	}
-	bool isGroupMigrate() const {
-		return _flags & MTPDmessage_ClientFlag::f_is_group_migrate;
-	}
-	bool hasViews() const {
-		return _flags & MTPDmessage::Flag::f_views;
-	}
-	bool isPost() const {
-		return _flags & MTPDmessage::Flag::f_post;
-	}
-	bool indexInOverview() const {
-		return (id > 0);
-	}
-	bool isSilent() const {
-		return _flags & MTPDmessage::Flag::f_silent;
-	}
-	bool hasOutLayout() const {
-		return out() && !isPost();
-	}
-	virtual int32 viewsCount() const {
-		return hasViews() ? 1 : -1;
-	}
-
-	virtual bool needCheck() const {
-		return out() || (id < 0 && history()->peer->isSelf());
-	}
-	virtual bool hasPoint(QPoint point) const {
-		return false;
-	}
-
-	virtual HistoryTextState getState(QPoint point, HistoryStateRequest request) const WARN_UNUSED_RESULT = 0;
-	virtual void updatePressed(QPoint point) {
-	}
-
-	virtual TextSelection adjustSelection(TextSelection selection, TextSelectType type) const WARN_UNUSED_RESULT {
-		return selection;
-	}
-
-	// ClickHandlerHost interface
-	void clickHandlerActiveChanged(const ClickHandlerPtr &p, bool active) override;
-	void clickHandlerPressedChanged(const ClickHandlerPtr &p, bool pressed) override;
-
-	virtual bool serviceMsg() const {
-		return false;
-	}
-	virtual void applyEdition(const MTPDmessage &message) {
-	}
-	virtual void applyEdition(const MTPDmessageService &message) {
-	}
-	virtual void updateMedia(const MTPMessageMedia *media) {
-	}
-	virtual void updateReplyMarkup(const MTPReplyMarkup *markup) {
-	}
-	virtual int32 addToOverview(AddToOverviewMethod method) {
-		return 0;
-	}
-	virtual void eraseFromOverview() {
-	}
-	virtual bool hasBubble() const {
-		return false;
-	}
-
-	void previousItemChanged();
-	void nextItemChanged();
-
-	virtual TextWithEntities selectedText(TextSelection selection) const {
-		return { qsl("[-]"), EntitiesInText() };
-	}
-
-	virtual QString notificationHeader() const {
-		return QString();
-	}
-	virtual QString notificationText() const;
-
-	enum class DrawInDialog {
-		Normal,
-		WithoutSender,
-	};
-
-	// Returns text with link-start and link-end commands for service-color highlighting.
-	// Example: "[link1-start]You:[link1-end] [link1-start]Photo,[link1-end] caption text"
-	virtual QString inDialogsText(DrawInDialog way) const;
-	virtual QString inReplyText() const {
-		return notificationText();
-	}
-	virtual TextWithEntities originalText() const {
-		return { QString(), EntitiesInText() };
-	}
-
-	virtual void drawInfo(Painter &p, int32 right, int32 bottom, int32 width, bool selected, InfoDisplayType type) const {
-	}
-	virtual ClickHandlerPtr fastShareLink() const {
-		return ClickHandlerPtr();
-	}
-	virtual bool displayFastShare() const {
-		return false;
-	}
-	virtual void drawFastShare(Painter &p, int left, int top, int outerWidth) const {
-	}
-	virtual void setViewsCount(int32 count) {
-	}
-	virtual void setId(MsgId newId);
-
-	void drawInDialog(
-		Painter &p,
-		const QRect &r,
-		bool active,
-		bool selected,
-		DrawInDialog way,
-		const HistoryItem *&cacheFor,
-		Text &cache) const;
-
-	bool emptyText() const {
-		return _text.isEmpty();
-	}
-
-	bool canPin() const;
-	bool canForward() const;
-	bool canEdit(const QDateTime &cur) const;
-	bool canDelete() const;
-	bool canDeleteForEveryone(const QDateTime &cur) const;
-	bool suggestBanReport() const;
-	bool suggestDeleteAllReport() const;
-
-	bool hasDirectLink() const;
-	QString directLink() const;
-
-	int y() const {
-		return _y;
-	}
-	void setY(int y) {
-		_y = y;
-	}
-	MsgId id;
-	QDateTime date;
-
-	ChannelId channelId() const {
-		return _history->channelId();
-	}
-	FullMsgId fullId() const {
-		return FullMsgId(channelId(), id);
-	}
-
-	HistoryMedia *getMedia() const {
-		return _media.get();
-	}
-	virtual void setText(const TextWithEntities &textWithEntities) {
-	}
-	virtual bool textHasLinks() const {
-		return false;
-	}
-
-	virtual int infoWidth() const {
-		return 0;
-	}
-	virtual int timeLeft() const {
-		return 0;
-	}
-	virtual int timeWidth() const {
-		return 0;
-	}
-	virtual bool pointInTime(int right, int bottom, QPoint point, InfoDisplayType type) const {
-		return false;
-	}
-
-	int skipBlockWidth() const {
-		return st::msgDateSpace + infoWidth() - st::msgDateDelta.x();
-	}
-	int skipBlockHeight() const {
-		return st::msgDateFont->height - st::msgDateDelta.y();
-	}
-	QString skipBlock() const {
-		return textcmdSkipBlock(skipBlockWidth(), skipBlockHeight());
-	}
-
-	virtual HistoryMessage *toHistoryMessage() { // dynamic_cast optimize
-		return nullptr;
-	}
-	virtual const HistoryMessage *toHistoryMessage() const { // dynamic_cast optimize
-		return nullptr;
-	}
-	MsgId replyToId() const {
-		if (auto reply = Get<HistoryMessageReply>()) {
-			return reply->replyToId();
-		}
-		return 0;
-	}
-
-	bool hasFromName() const {
-		return (!out() || isPost()) && !history()->peer->isUser();
-	}
-	PeerData *author() const {
-		return isPost() ? history()->peer : from();
-	}
-
-	QDateTime dateOriginal() const {
-		if (auto forwarded = Get<HistoryMessageForwarded>()) {
-			return forwarded->_originalDate;
-		}
-		return date;
-	}
-	PeerData *senderOriginal() const {
-		if (auto forwarded = Get<HistoryMessageForwarded>()) {
-			return forwarded->_originalSender;
-		}
-		auto peer = history()->peer;
-		return (peer->isChannel() && !peer->isMegagroup()) ? peer : from();
-	}
-	PeerData *fromOriginal() const {
-		if (auto forwarded = Get<HistoryMessageForwarded>()) {
-			if (auto user = forwarded->_originalSender->asUser()) {
-				return user;
-			}
-		}
-		return from();
-	}
-	QString authorOriginal() const {
-		if (auto forwarded = Get<HistoryMessageForwarded>()) {
-			return forwarded->_originalAuthor;
-		} else if (auto msgsigned = Get<HistoryMessageSigned>()) {
-			return msgsigned->_author;
-		}
-		return QString();
-	}
-	MsgId idOriginal() const {
-		if (auto forwarded = Get<HistoryMessageForwarded>()) {
-			return forwarded->_originalId;
-		}
-		return id;
-	}
-
-	// count > 0 - creates the unread bar if necessary and
-	// sets unread messages count if bar is not freezed yet
-	// count <= 0 - destroys the unread bar
-	void setUnreadBarCount(int count);
-	void destroyUnreadBar();
-
-	// marks the unread bar as freezed so that unread
-	// messages count will not change for this bar
-	// when the new messages arrive in this chat history
-	void setUnreadBarFreezed();
-
-	bool pendingResize() const {
-		return _flags & MTPDmessage_ClientFlag::f_pending_resize;
-	}
-	void setPendingResize() {
-		_flags |= MTPDmessage_ClientFlag::f_pending_resize;
-		if (!detached() || isLogEntry()) {
-			_history->setHasPendingResizedItems();
-		}
-	}
-	bool pendingInitDimensions() const {
-		return _flags & MTPDmessage_ClientFlag::f_pending_init_dimensions;
-	}
-	void setPendingInitDimensions() {
-		_flags |= MTPDmessage_ClientFlag::f_pending_init_dimensions;
-		setPendingResize();
-	}
-
-	int displayedDateHeight() const {
-		if (auto date = Get<HistoryMessageDate>()) {
-			return date->height();
-		}
-		return 0;
-	}
-	int marginTop() const {
-		int result = 0;
-		if (isAttachedToPrevious()) {
-			result += st::msgMarginTopAttached;
-		} else {
-			result += st::msgMargin.top();
-		}
-		result += displayedDateHeight();
-		if (auto unreadbar = Get<HistoryMessageUnreadBar>()) {
-			result += unreadbar->height();
-		}
-		return result;
-	}
-	int marginBottom() const {
-		return st::msgMargin.bottom();
-	}
-	bool isAttachedToPrevious() const {
-		return _flags & MTPDmessage_ClientFlag::f_attach_to_previous;
-	}
-	bool isAttachedToNext() const {
-		return _flags & MTPDmessage_ClientFlag::f_attach_to_next;
-	}
-	bool displayDate() const {
-		return Has<HistoryMessageDate>();
-	}
-
-	bool isInOneDayWithPrevious() const {
-		return !isEmpty() && !displayDate();
-	}
-
-	bool isEmpty() const {
-		return _text.isEmpty() && !_media && !Has<HistoryMessageLogEntryOriginal>();
-	}
-
-	int width() const {
-		return _width;
-	}
-
-	void clipCallback(Media::Clip::Notification notification);
-	void audioTrackUpdated();
-
-	bool computeIsAttachToPrevious(not_null<HistoryItem*> previous);
-	void setLogEntryDisplayDate(bool displayDate) {
-		Expects(isLogEntry());
-		setDisplayDate(displayDate);
-	}
-	void setLogEntryAttachToPrevious(bool attachToPrevious) {
-		Expects(isLogEntry());
-		setAttachToPrevious(attachToPrevious);
-	}
-	void setLogEntryAttachToNext(bool attachToNext) {
-		Expects(isLogEntry());
-		setAttachToNext(attachToNext);
-	}
-
-	~HistoryItem();
-
-protected:
 	HistoryItem(
 		not_null<History*> history,
 		MsgId id,
-		MTPDmessage::Flags flags,
-		QDateTime date,
-		UserId from);
+		const MTPDmessage &data,
+		MessageFlags localFlags);
+	HistoryItem(
+		not_null<History*> history,
+		MsgId id,
+		const MTPDmessageService &data,
+		MessageFlags localFlags);
+	HistoryItem(
+		not_null<History*> history,
+		MsgId id,
+		const MTPDmessageEmpty &data,
+		MessageFlags localFlags);
 
-	// To completely create history item we need to call
-	// a virtual method, it can not be done from constructor.
-	virtual void finishCreate();
+	HistoryItem( // Sponsored message.
+		not_null<History*> history,
+		MsgId id,
+		Data::SponsoredFrom from,
+		const TextWithEntities &textWithEntities,
+		HistoryItem *injectedAfter);
+	HistoryItem( // Story wrap.
+		not_null<History*> history,
+		MsgId id,
+		not_null<Data::Story*> story);
 
-	// Called from resizeGetHeight() when MTPDmessage_ClientFlag::f_pending_init_dimensions is set.
-	virtual void initDimensions() = 0;
+	HistoryItem( // Local message.
+		not_null<History*> history,
+		HistoryItemCommonFields &&fields,
+		const TextWithEntities &textWithEntities,
+		const MTPMessageMedia &media);
+	HistoryItem( // Local service message.
+		not_null<History*> history,
+		HistoryItemCommonFields &&fields,
+		PreparedServiceText &&message,
+		PhotoData *photo = nullptr);
+	HistoryItem( // Local forwarded.
+		not_null<History*> history,
+		HistoryItemCommonFields &&fields,
+		not_null<HistoryItem*> original);
+	HistoryItem( // Local photo.
+		not_null<History*> history,
+		HistoryItemCommonFields &&fields,
+		not_null<PhotoData*> photo,
+		const TextWithEntities &caption);
+	HistoryItem( // Local document.
+		not_null<History*> history,
+		HistoryItemCommonFields &&fields,
+		not_null<DocumentData*> document,
+		const TextWithEntities &caption);
+	HistoryItem( // Local game.
+		not_null<History*> history,
+		HistoryItemCommonFields &&fields,
+		not_null<GameData*> game);
+	~HistoryItem();
 
-	virtual void markMediaAsReadHook() {
+	struct Destroyer {
+		void operator()(HistoryItem *value);
+	};
+
+	void dependencyItemRemoved(not_null<HistoryItem*> dependency);
+	void dependencyStoryRemoved(not_null<Data::Story*> dependency);
+	void updateDependencyItem();
+	[[nodiscard]] MsgId dependencyMsgId() const;
+	[[nodiscard]] bool notificationReady() const;
+	[[nodiscard]] PeerData *specialNotificationPeer() const;
+	void checkStoryForwardInfo();
+	void checkBuyButton();
+
+	void resolveDependent();
+
+	void updateServiceText(PreparedServiceText &&text);
+	void updateStoryMentionText();
+
+	[[nodiscard]] UserData *viaBot() const;
+	[[nodiscard]] UserData *getMessageBot() const;
+	[[nodiscard]] bool isHistoryEntry() const;
+	[[nodiscard]] bool isAdminLogEntry() const;
+	[[nodiscard]] bool isFromScheduled() const;
+	[[nodiscard]] bool isScheduled() const;
+	[[nodiscard]] bool isSponsored() const;
+	[[nodiscard]] bool canLookupMessageAuthor() const;
+	[[nodiscard]] bool skipNotification() const;
+	[[nodiscard]] bool isUserpicSuggestion() const;
+	[[nodiscard]] bool isSavedMusicItem() const;
+	[[nodiscard]] BusinessShortcutId shortcutId() const;
+	[[nodiscard]] bool isBusinessShortcut() const;
+	void setRealShortcutId(BusinessShortcutId id);
+	void setCustomServiceLink(ClickHandlerPtr link);
+
+	void addLogEntryOriginal(
+		WebPageId localId,
+		const QString &label,
+		const TextWithEntities &content);
+	void setFactcheck(MessageFactcheck info);
+	[[nodiscard]] bool hasUnrequestedFactcheck() const;
+	[[nodiscard]] TextWithEntities factcheckText() const;
+
+	[[nodiscard]] not_null<Data::Thread*> notificationThread() const;
+	[[nodiscard]] not_null<History*> history() const {
+		return _history;
+	}
+	[[nodiscard]] Data::ForumTopic *topic() const;
+	[[nodiscard]] not_null<PeerData*> from() const {
+		return _from;
+	}
+	[[nodiscard]] HistoryView::Element *mainView() const {
+		return _mainView;
+	}
+	void setMainView(not_null<HistoryView::Element*> view) {
+		_mainView = view;
+	}
+	void refreshMainView();
+	void clearMainView();
+	void removeMainView();
+
+	void invalidateChatListEntry();
+
+	void destroy();
+	[[nodiscard]] bool out() const {
+		return _flags & MessageFlag::Outgoing;
+	}
+	[[nodiscard]] bool isPinned() const {
+		return _flags & MessageFlag::Pinned;
+	}
+	[[nodiscard]] bool invertMedia() const {
+		return _flags & MessageFlag::InvertMedia;
+	}
+	[[nodiscard]] bool storyInProfile() const {
+		return _flags & MessageFlag::StoryInProfile;
+	}
+	[[nodiscard]] bool unread(not_null<Data::Thread*> thread) const;
+	[[nodiscard]] bool showNotification() const;
+	void markClientSideAsRead();
+	[[nodiscard]] bool mentionsMe() const;
+	[[nodiscard]] bool isUnreadMention() const;
+	[[nodiscard]] bool hasUnreadReaction() const;
+	[[nodiscard]] bool hasUnwatchedEffect() const;
+	bool markEffectWatched();
+	[[nodiscard]] bool isUnreadMedia() const;
+	[[nodiscard]] bool isIncomingUnreadMedia() const;
+	[[nodiscard]] bool hasUnreadMediaFlag() const;
+	void markReactionsRead();
+	void markMediaAndMentionRead();
+	bool markContentsRead(bool fromThisClient = false);
+	void setIsPinned(bool isPinned);
+	void setStoryInProfile(bool inProfile);
+
+	// For edit media in history_message.
+	void returnSavedMedia();
+	void savePreviousMedia();
+	[[nodiscard]] bool isEditingMedia() const;
+	void clearSavedMedia();
+
+	// Zero result means this message is not self-destructing right now.
+	[[nodiscard]] crl::time getSelfDestructIn(crl::time now);
+
+	[[nodiscard]] bool definesReplyKeyboard() const;
+	[[nodiscard]] ReplyMarkupFlags replyKeyboardFlags() const;
+
+	void cacheOnlyEmojiAndSpaces(bool only);
+	[[nodiscard]] bool isOnlyEmojiAndSpaces() const;
+	[[nodiscard]] bool hasSwitchInlineButton() const {
+		return _flags & MessageFlag::HasSwitchInlineButton;
+	}
+	[[nodiscard]] bool hasTextLinks() const {
+		return _flags & MessageFlag::HasTextLinks;
+	}
+	[[nodiscard]] bool isGroupEssential() const {
+		return _flags & MessageFlag::IsGroupEssential;
+	}
+	[[nodiscard]] bool isLocalUpdateMedia() const {
+		return _flags & MessageFlag::IsLocalUpdateMedia;
+	}
+	void setIsLocalUpdateMedia(bool flag) {
+		if (flag) {
+			_flags |= MessageFlag::IsLocalUpdateMedia;
+		} else {
+			_flags &= ~MessageFlag::IsLocalUpdateMedia;
+		}
+	}
+	[[nodiscard]] bool isGroupMigrate() const {
+		return isGroupEssential() && isEmpty();
+	}
+	[[nodiscard]] bool hasViews() const {
+		return _flags & MessageFlag::HasViews;
+	}
+	[[nodiscard]] bool isPost() const {
+		return _flags & MessageFlag::Post;
+	}
+	[[nodiscard]] bool isSilent() const {
+		return _flags & MessageFlag::Silent;
+	}
+	[[nodiscard]] bool isSending() const {
+		return _flags & MessageFlag::BeingSent;
+	}
+	[[nodiscard]] bool hasFailed() const {
+		return _flags & MessageFlag::SendingFailed;
+	}
+	[[nodiscard]] bool hideEditedBadge() const {
+		return (_flags & MessageFlag::HideEdited);
+	}
+	[[nodiscard]] bool hideDisplayDate() const {
+		return isEmpty() || (_flags & MessageFlag::HideDisplayDate);
+	}
+	[[nodiscard]] bool isLocal() const {
+		return _flags & MessageFlag::Local;
+	}
+	[[nodiscard]] bool isFakeAboutView() const {
+		return _flags & MessageFlag::FakeAboutView;
+	}
+	[[nodiscard]] bool showSimilarChannels() const {
+		return _flags & MessageFlag::ShowSimilarChannels;
+	}
+	[[nodiscard]] bool hasRealFromId() const;
+	[[nodiscard]] bool isPostHidingAuthor() const;
+	[[nodiscard]] bool isPostShowingAuthor() const;
+	[[nodiscard]] bool isRegular() const;
+	[[nodiscard]] bool isUploading() const;
+	void sendFailed();
+	[[nodiscard]] int viewsCount() const;
+	[[nodiscard]] int repliesCount() const;
+	[[nodiscard]] bool repliesAreComments() const;
+	[[nodiscard]] bool externalReply() const;
+	[[nodiscard]] bool hasUnpaidContent() const;
+	[[nodiscard]] bool inHighlightProcess() const;
+	void highlightProcessDone();
+	[[nodiscard]] PaidPostType paidType() const;
+
+	void setCommentsInboxReadTill(MsgId readTillId);
+	void setCommentsMaxId(MsgId maxId);
+	void setCommentsPossibleMaxId(MsgId possibleMaxId);
+	[[nodiscard]] bool areCommentsUnread() const;
+
+	[[nodiscard]] FullMsgId commentsItemId() const;
+	void setCommentsItemId(FullMsgId id);
+
+	[[nodiscard]] bool needCheck() const;
+
+	[[nodiscard]] bool isService() const;
+	void applyEdition(HistoryMessageEdition &&edition);
+	void applyChanges(not_null<Data::Story*> story);
+
+	void applyEdition(const MTPDmessageService &message);
+	void applyEdition(const QVector<MTPMessageExtendedMedia> &media);
+	void updateForwardedInfo(const MTPMessageFwdHeader *fwd);
+	void updateSentContent(
+		const TextWithEntities &textWithEntities,
+		const MTPMessageMedia *media);
+	void applySentMessage(const MTPDmessage &data);
+	void applySentMessage(
+		const QString &text,
+		const MTPDupdateShortSentMessage &data,
+		bool wasAlready);
+	void updateReactions(const MTPMessageReactions *reactions);
+	void overrideMedia(std::unique_ptr<Data::Media> media);
+
+	void applyEditionToHistoryCleared();
+	void updateReplyMarkup(
+		HistoryMessageMarkupData &&markup,
+		bool ignoreSuggestButtons = false);
+	void contributeToSlowmode(TimeId realDate = 0);
+
+	void clearMediaAsExpired();
+
+	void addToUnreadThings(HistoryUnreadThings::AddType type);
+	void destroyHistoryEntry();
+	[[nodiscard]] Storage::SharedMediaTypesMask sharedMediaTypes() const;
+
+	void indexAsNewItem();
+	void addToSharedMediaIndex();
+	void addToMessagesIndex();
+	void removeFromSharedMediaIndex();
+
+	struct NotificationTextOptions {
+		bool spoilerLoginCode = false;
+	};
+	[[nodiscard]] QString notificationHeader() const;
+	[[nodiscard]] TextWithEntities notificationText(
+		NotificationTextOptions options) const;
+	[[nodiscard]] TextWithEntities notificationText() const {
+		return notificationText({});
 	}
 
-	virtual int resizeContentGetHeight() = 0;
+	using ToPreviewOptions = HistoryView::ToPreviewOptions;
+	using ItemPreview = HistoryView::ItemPreview;
 
+	// Returns text with link-start and link-end commands for service-color highlighting.
+	// Example: "[link1-start]You:[link1-end] [link1-start]Photo,[link1-end] caption text"
+	[[nodiscard]] ItemPreview toPreview(ToPreviewOptions options) const;
+	[[nodiscard]] TextWithEntities inReplyText() const;
+	[[nodiscard]] const TextWithEntities &originalText() const;
+	[[nodiscard]] const TextWithEntities &translatedText() const;
+	[[nodiscard]] TextWithEntities translatedTextWithLocalEntities() const;
+	[[nodiscard]] const std::vector<ClickHandlerPtr> &customTextLinks() const;
+	[[nodiscard]] TextForMimeData clipboardText() const;
+
+	bool changeViewsCount(int count);
+	void setForwardsCount(int count);
+	void setReplies(HistoryMessageRepliesData &&data);
+	void clearReplies();
+	void changeRepliesCount(int delta, PeerId replier);
+	void setReplyFields(
+		MsgId replyTo,
+		MsgId replyToTop,
+		bool isForumPost);
+	void setPostAuthor(const QString &author);
+	void setRealId(MsgId newId);
+	void incrementReplyToTopCounter();
+	void applyEffectWatchedOnUnreadKnown();
+
+	[[nodiscard]] bool emptyText() const {
+		return _text.empty();
+	}
+
+	[[nodiscard]] bool canPin() const;
+	[[nodiscard]] bool canBeEdited() const;
+	[[nodiscard]] bool canStopPoll() const;
+	[[nodiscard]] bool forbidsForward() const;
+	[[nodiscard]] bool forbidsSaving() const;
+	[[nodiscard]] bool allowsSendNow() const;
+	[[nodiscard]] bool allowsReschedule() const;
+	[[nodiscard]] bool allowsForward() const;
+	[[nodiscard]] bool allowsEdit(TimeId now) const;
+	[[nodiscard]] bool allowsEditMedia() const;
+	[[nodiscard]] bool canDelete() const;
+	[[nodiscard]] bool canDeleteForEveryone(TimeId now) const;
+	[[nodiscard]] bool suggestReport() const;
+	[[nodiscard]] bool suggestBanReport() const;
+	[[nodiscard]] bool suggestDeleteAllReport() const;
+	[[nodiscard]] ChatRestriction requiredSendRight() const;
+	[[nodiscard]] bool requiresSendInlineRight() const;
+	[[nodiscard]] Data::SendError errorTextForForward(
+		not_null<Data::Thread*> to) const;
+	[[nodiscard]] Data::SendError errorTextForForwardIgnoreRights(
+		not_null<Data::Thread*> to) const;
+	[[nodiscard]] const HistoryMessageTranslation *translation() const;
+	[[nodiscard]] bool translationShowRequiresCheck(LanguageId to) const;
+	bool translationShowRequiresRequest(LanguageId to);
+	void translationDone(LanguageId to, TextWithEntities result);
+
+	[[nodiscard]] bool canReact() const;
+	void toggleReaction(
+		const Data::ReactionId &reaction,
+		HistoryReactionSource source);
+	void addPaidReaction(int count, std::optional<PeerId> shownPeer = {});
+	void cancelScheduledPaidReaction();
+	[[nodiscard]] Data::PaidReactionSend startPaidReactionSending();
+	void finishPaidReactionSending(
+		Data::PaidReactionSend send,
+		bool success);
+	void updateReactionsUnknown();
+	[[nodiscard]] auto reactions() const
+		-> const std::vector<Data::MessageReaction> &;
+	[[nodiscard]] auto reactionsWithLocal() const
+		-> std::vector<Data::MessageReaction>;
+	[[nodiscard]] auto recentReactions() const
+		-> const base::flat_map<
+			Data::ReactionId,
+			std::vector<Data::RecentReaction>> &;
+	[[nodiscard]] auto topPaidReactionsWithLocal() const
+		-> std::vector<Data::MessageReactionsTopPaid>;
+	[[nodiscard]] int reactionsPaidScheduled() const;
+	[[nodiscard]] PeerId reactionsLocalShownPeer() const;
+	[[nodiscard]] bool canViewReactions() const;
+	[[nodiscard]] std::vector<Data::ReactionId> chosenReactions() const;
+	[[nodiscard]] Data::ReactionId lookupUnreadReaction(
+		not_null<UserData*> from) const;
+	[[nodiscard]] crl::time lastReactionsRefreshTime() const;
+
+	[[nodiscard]] bool reactionsAreTags() const;
+	[[nodiscard]] bool hasDirectLink() const;
+	[[nodiscard]] bool changesWallPaper() const;
+
+	[[nodiscard]] FullMsgId fullId() const;
+	[[nodiscard]] GlobalMsgId globalId() const;
+	[[nodiscard]] Data::MessagePosition position() const;
+	[[nodiscard]] TimeId date() const;
+	[[nodiscard]] bool awaitingVideoProcessing() const;
+
+	[[nodiscard]] Data::Media *media() const {
+		return _media.get();
+	}
+	[[nodiscard]] bool computeDropForwardedInfo() const;
+	void setText(const TextWithEntities &textWithEntities);
+
+	[[nodiscard]] MsgId replyToId() const;
+	[[nodiscard]] FullMsgId replyToFullId() const;
+	[[nodiscard]] MsgId replyToTop() const;
+	[[nodiscard]] MsgId topicRootId() const;
+	[[nodiscard]] FullStoryId replyToStory() const;
+	[[nodiscard]] FullReplyTo replyTo() const;
+	[[nodiscard]] bool inThread(MsgId rootId) const;
+
+	[[nodiscard]] not_null<PeerData*> author() const;
+
+	[[nodiscard]] TimeId originalDate() const;
+	[[nodiscard]] PeerData *originalSender() const;
+	[[nodiscard]] const HiddenSenderInfo *originalHiddenSenderInfo() const;
+	[[nodiscard]] not_null<PeerData*> fromOriginal() const;
+	[[nodiscard]] QString originalPostAuthor() const;
+	[[nodiscard]] MsgId originalId() const;
+
+	[[nodiscard]] Data::SavedSublist *savedSublist() const;
+	[[nodiscard]] PeerId sublistPeerId() const;
+	[[nodiscard]] PeerData *savedFromSender() const;
+	[[nodiscard]] const HiddenSenderInfo *savedFromHiddenSenderInfo() const;
+
+	[[nodiscard]] const HiddenSenderInfo *displayHiddenSenderInfo() const;
+
+	[[nodiscard]] bool showForwardsFromSender(
+		not_null<const HistoryMessageForwarded*> forwarded) const;
+
+	[[nodiscard]] bool isEmpty() const;
+	[[nodiscard]] MessageGroupId groupId() const;
+	[[nodiscard]] EffectId effectId() const;
+	[[nodiscard]] bool hasPossibleRestrictions() const;
+	[[nodiscard]] QString computeUnavailableReason() const;
+	[[nodiscard]] bool isMediaSensitive() const;
+
+	[[nodiscard]] const HistoryMessageReplyMarkup *inlineReplyMarkup() const {
+		return const_cast<HistoryItem*>(this)->inlineReplyMarkup();
+	}
+	[[nodiscard]] const ReplyKeyboard *inlineReplyKeyboard() const {
+		return const_cast<HistoryItem*>(this)->inlineReplyKeyboard();
+	}
+	[[nodiscard]] HistoryMessageReplyMarkup *inlineReplyMarkup();
+	[[nodiscard]] ReplyKeyboard *inlineReplyKeyboard();
+
+	[[nodiscard]] ChannelData *discussionPostOriginalSender() const;
+	[[nodiscard]] bool isDiscussionPost() const;
+	[[nodiscard]] HistoryItem *lookupDiscussionPostOriginal() const;
+	[[nodiscard]] PeerData *displayFrom() const;
+	[[nodiscard]] uint8 colorIndex() const;
+
+	// In forwards we show name in sender's color, but the message
+	// content uses the color of the original sender.
+	[[nodiscard]] PeerData *contentColorsFrom() const;
+	[[nodiscard]] uint8 contentColorIndex() const;
+	[[nodiscard]] int starsPaid() const;
+
+	[[nodiscard]] std::unique_ptr<HistoryView::Element> createView(
+		not_null<HistoryView::ElementDelegate*> delegate,
+		HistoryView::Element *replacing = nullptr);
+
+	void updateDate(TimeId newDate);
+	[[nodiscard]] bool canUpdateDate() const;
+	void customEmojiRepaint();
+
+	[[nodiscard]] SuggestionActions computeSuggestionActions() const;
+	[[nodiscard]] SuggestionActions computeSuggestionActions(
+		const HistoryMessageSuggestedPost *suggest) const;
+	[[nodiscard]] SuggestionActions computeSuggestionActions(
+		bool accepted,
+		bool rejected) const;
+
+	[[nodiscard]] bool needsUpdateForVideoQualities(const MTPMessage &data);
+
+	[[nodiscard]] TimeId ttlDestroyAt() const {
+		return _ttlDestroyAt;
+	}
+
+	[[nodiscard]] int boostsApplied() const {
+		return _boostsApplied;
+	}
+
+	MsgId id;
+
+private:
+	struct CreateConfig;
+
+	HistoryItem(
+		not_null<History*> history,
+		const HistoryItemCommonFields &fields);
+
+	void createComponentsHelper(HistoryItemCommonFields &&fields);
+	void createComponents(CreateConfig &&config);
+	void setupForwardedComponent(const CreateConfig &config);
+	void applyInitialEffectWatched();
+
+	[[nodiscard]] bool generateLocalEntitiesByReply() const;
+	[[nodiscard]] TextWithEntities withLocalEntities(
+		const TextWithEntities &textWithEntities) const;
+	void setTextValue(TextWithEntities text, bool force = false);
+	[[nodiscard]] bool isTooOldForEdit(TimeId now) const;
+	[[nodiscard]] bool isLegacyMessage() const {
+		return _flags & MessageFlag::Legacy;
+	}
+
+	[[nodiscard]] bool checkDiscussionLink(ChannelId id) const;
+
+	void setReplyMarkup(
+		HistoryMessageMarkupData &&markup,
+		bool ignoreSuggestButtons = false);
+	void updateSuggestControls(const HistoryMessageSuggestedPost *suggest);
+
+	void changeReplyToTopCounter(
+		not_null<HistoryMessageReply*> reply,
+		int delta);
+	void refreshRepliesText(
+		not_null<HistoryMessageViews*> views,
+		bool forceResize = false);
+
+	[[nodiscard]] bool checkRepliesPts(
+		const HistoryMessageRepliesData &data) const;
+
+	[[nodiscard]] HistoryServiceDependentData *GetServiceDependentData();
+	[[nodiscard]] auto GetServiceDependentData() const
+		-> const HistoryServiceDependentData *;
+	void updateDependentServiceText();
+	void updateServiceDependent(bool force = false);
+	void setServiceText(PreparedServiceText &&prepared);
+
+	void setStoryFields(not_null<Data::Story*> story);
 	void finishEdition(int oldKeyboardTop);
 	void finishEditionToEmpty();
 
+	void clearDependencyMessage();
+	void setupChatThemeChange();
+	void setupTTLChange();
+
+	void translationToggle(
+		not_null<HistoryMessageTranslation*> translation,
+		bool used);
+	void setSelfDestruct(HistorySelfDestructType type, MTPint mtpTTLvalue);
+
+	void resolveDependent(not_null<HistoryServiceDependentData*> dependent);
+	void resolveDependent(not_null<HistoryMessageReply*> reply);
+
+	[[nodiscard]] TextWithEntities fromLinkText() const;
+	[[nodiscard]] ClickHandlerPtr fromLink() const;
+
+	void setGroupId(MessageGroupId groupId);
+
+	static void FillForwardedInfo(
+		CreateConfig &config,
+		const MTPDmessageFwdHeader &data);
+	void createComponents(const MTPDmessage &data);
+	void setMedia(const MTPMessageMedia &media);
+	void applyServiceDateEdition(const MTPDmessageService &data);
+	void setReactions(const MTPMessageReactions *reactions);
+	[[nodiscard]] bool changeReactions(const MTPMessageReactions *reactions);
+	void setServiceMessageByAction(const MTPmessageAction &action);
+	void applyAction(const MTPMessageAction &action);
+	void refreshMedia(const MTPMessageMedia *media);
+	void refreshSentMedia(const MTPMessageMedia *media);
+	void createServiceFromMtp(const MTPDmessage &message);
+	void createServiceFromMtp(const MTPDmessageService &message);
+	void applyTTL(const MTPDmessage &data);
+	void applyTTL(const MTPDmessageService &data);
+
+	void applyTTL(TimeId destroyAt);
+
+	// For an invoice button we replace the button text with a "Receipt" key.
+	// It should show the receipt for the payed invoice. Still let mobile apps do that.
+	void replaceBuyWithReceiptInMarkup();
+
+	[[nodiscard]] PreparedServiceText preparePinnedText();
+	[[nodiscard]] PreparedServiceText prepareGameScoreText();
+	[[nodiscard]] PreparedServiceText preparePaymentSentText();
+	[[nodiscard]] PreparedServiceText prepareStoryMentionText();
+	[[nodiscard]] PreparedServiceText prepareInvitedToCallText(
+		const std::vector<not_null<UserData*>> &users,
+		CallId linkCallId);
+	[[nodiscard]] PreparedServiceText prepareCallScheduledText(
+		TimeId scheduleDate);
+	[[nodiscard]] PreparedServiceText prepareTodoCompletionsText();
+	[[nodiscard]] PreparedServiceText prepareTodoAppendTasksText();
+
+	[[nodiscard]] PreparedServiceText composeTodoIncompleted(
+		not_null<HistoryServiceTodoCompletions*> done);
+	[[nodiscard]] PreparedServiceText composeTodoCompleted(
+		not_null<HistoryServiceTodoCompletions*> done);
+
+	[[nodiscard]] PreparedServiceText prepareServiceTextForMessage(
+		const MTPMessageMedia &media,
+		bool unread);
+
+	void flagSensitiveContent();
+	[[nodiscard]] PeerData *computeDisplayFrom() const;
+
 	const not_null<History*> _history;
-	not_null<PeerData*> _from;
-	HistoryBlock *_block = nullptr;
-	int _indexInBlock = -1;
-	MTPDmessage::Flags _flags = 0;
+	const not_null<PeerData*> _from;
+	mutable PeerData *_displayFrom = nullptr;
+	mutable MessageFlags _flags = 0;
 
-	mutable int32 _authorNameVersion = 0;
+	TextWithEntities _text;
 
-	HistoryItem *previousItem() const {
-		if (_block && _indexInBlock >= 0) {
-			if (_indexInBlock > 0) {
-				return _block->items.at(_indexInBlock - 1);
-			}
-			if (auto previous = _block->previousBlock()) {
-				Assert(!previous->items.isEmpty());
-				return previous->items.back();
-			}
-		}
-		return nullptr;
-	}
-	HistoryItem *nextItem() const {
-		if (_block && _indexInBlock >= 0) {
-			if (_indexInBlock + 1 < _block->items.size()) {
-				return _block->items.at(_indexInBlock + 1);
-			}
-			if (auto next = _block->nextBlock()) {
-				Assert(!next->items.isEmpty());
-				return next->items.front();
-			}
-		}
-		return nullptr;
-	}
+	std::unique_ptr<Data::Media> _media;
+	std::unique_ptr<Data::MessageReactions> _reactions;
+	crl::time _reactionsLastRefreshed = 0;
 
-	// This should be called only from previousItemChanged()
-	// to add required bits to the Composer mask
-	// after that always use Has<HistoryMessageDate>().
-	void recountDisplayDate();
+	TimeId _date = 0;
+	TimeId _ttlDestroyAt = 0;
+	int _boostsApplied = 0;
+	int _starsPaid = 0;
+	BusinessShortcutId _shortcutId = 0;
 
-	// This should be called only from previousItemChanged() or when
-	// HistoryMessageDate or HistoryMessageUnreadBar bit is changed in the Composer mask
-	// then the result should be cached in a client side flag MTPDmessage_ClientFlag::f_attach_to_previous.
-	void recountAttachToPrevious();
+	MessageGroupId _groupId = MessageGroupId();
+	EffectId _effectId = 0;
+	HistoryView::Element *_mainView = nullptr;
 
-	// This should be called only from recountDisplayDate().
-	// Also this is called from setLogEntryDisplayDate() for channel log entries.
-	void setDisplayDate(bool displayDate);
-
-	// This should be called only from recountAttachToPrevious().
-	// Also this is called from setLogEntryAttachToPrevious() for channel log entries.
-	void setAttachToPrevious(bool attachToNext);
-
-	// This should be called only from recountAttachToPrevious() of the next item
-	// or when the next item is removed through nextItemChanged() call.
-	// Also this is called from setLogEntryAttachToNext() for channel log entries.
-	void setAttachToNext(bool attachToNext);
-
-	const HistoryMessageReplyMarkup *inlineReplyMarkup() const {
-		return const_cast<HistoryItem*>(this)->inlineReplyMarkup();
-	}
-	const ReplyKeyboard *inlineReplyKeyboard() const {
-		return const_cast<HistoryItem*>(this)->inlineReplyKeyboard();
-	}
-	HistoryMessageReplyMarkup *inlineReplyMarkup() {
-		if (auto markup = Get<HistoryMessageReplyMarkup>()) {
-			if (markup->flags & MTPDreplyKeyboardMarkup_ClientFlag::f_inline) {
-				return markup;
-			}
-		}
-		return nullptr;
-	}
-	ReplyKeyboard *inlineReplyKeyboard() {
-		if (auto markup = inlineReplyMarkup()) {
-			return markup->inlineKeyboard.get();
-		}
-		return nullptr;
-	}
-
-	TextSelection skipTextSelection(TextSelection selection) const WARN_UNUSED_RESULT {
-		return internal::unshiftSelection(selection, _text);
-	}
-	TextSelection unskipTextSelection(TextSelection selection) const WARN_UNUSED_RESULT {
-		return internal::shiftSelection(selection, _text);
-	}
-
-	Text _text = { int(st::msgMinWidth) };
-	int _textWidth = -1;
-	int _textHeight = 0;
-
-	HistoryMediaPtr _media;
-
-private:
-	int _y = 0;
-	int _width = 0;
+	friend class HistoryView::Element;
+	friend class HistoryView::Message;
+	friend class HistoryView::Service;
+	friend class HistoryView::ServiceMessagePainter;
 
 };
 
-// make all the constructors in HistoryItem children protected
-// and wrapped with a static create() call with the same args
-// so that history item can not be created directly, without
-// calling a virtual finishCreate() method
-template <typename T>
-class HistoryItemInstantiated {
-public:
-	template <typename ...Args>
-	static not_null<T*> _create(Args &&... args) {
-		auto result = new T(std::forward<Args>(args)...);
-		result->finishCreate();
-		return result;
-	}
-
-};
-
-ClickHandlerPtr goToMessageClickHandler(PeerData *peer, MsgId msgId);
-
-inline ClickHandlerPtr goToMessageClickHandler(HistoryItem *item) {
-	return goToMessageClickHandler(item->history()->peer, item->id);
-}
+constexpr auto kSize = int(sizeof(HistoryItem));

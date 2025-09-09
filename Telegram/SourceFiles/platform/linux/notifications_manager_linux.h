@@ -1,22 +1,9 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
@@ -25,35 +12,27 @@ Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
 namespace Platform {
 namespace Notifications {
 
-inline bool SkipAudio() {
-	return false;
-}
-
-inline bool SkipToast() {
-	return false;
-}
-
-inline void FlashBounce() {
-}
-
-void Finish();
-
 class Manager : public Window::Notifications::NativeManager {
 public:
-	Manager(Window::Notifications::System *system);
-
-	void clearNotification(PeerId peerId, MsgId msgId);
-	bool hasPoorSupport() const;
-	bool hasActionsSupport() const;
-
+	Manager(not_null<Window::Notifications::System*> system);
 	~Manager();
 
 protected:
-	void doShowNativeNotification(PeerData *peer, MsgId msgId, const QString &title, const QString &subtitle, const QString &msg, bool hideNameAndPhoto, bool hideReplyButton) override;
+	void doShowNativeNotification(
+		NotificationInfo &&info,
+		Ui::PeerUserpicView &userpicView) override;
 	void doClearAllFast() override;
-	void doClearFromHistory(History *history) override;
+	void doClearFromItem(not_null<HistoryItem*> item) override;
+	void doClearFromTopic(not_null<Data::ForumTopic*> topic) override;
+	void doClearFromSublist(not_null<Data::SavedSublist*> sublist) override;
+	void doClearFromHistory(not_null<History*> history) override;
+	void doClearFromSession(not_null<Main::Session*> session) override;
+	bool doSkipToast() const override;
+	void doMaybePlaySound(Fn<void()> playSound) override;
+	void doMaybeFlashBounce(Fn<void()> flashBounce) override;
 
 private:
+	friend void Create(Window::Notifications::System *system);
 	class Private;
 	const std::unique_ptr<Private> _private;
 

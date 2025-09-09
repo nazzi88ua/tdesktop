@@ -1,29 +1,72 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
+
+#include "base/unique_qptr.h"
+
+namespace Ui {
+class RpWidget;
+} // namespace Ui
 
 namespace Calls {
 
 class Call;
 
-std::vector<EmojiPtr> ComputeEmojiFingerprint(not_null<Call*> call);
+[[nodiscard]] std::vector<EmojiPtr> ComputeEmojiFingerprint(
+	not_null<Call*> call);
+[[nodiscard]] std::vector<EmojiPtr> ComputeEmojiFingerprint(
+	bytes::const_span fingerprint);
+
+[[nodiscard]] base::unique_qptr<Ui::RpWidget> CreateFingerprintAndSignalBars(
+	not_null<QWidget*> parent,
+	not_null<Call*> call);
+
+struct FingerprintBadgeState {
+	struct Entry {
+		EmojiPtr emoji = nullptr;
+		std::vector<EmojiPtr> sliding;
+		std::vector<EmojiPtr> carousel;
+		crl::time time = 0;
+		float64 speed = 0.;
+		float64 position = 0.;
+		int added = 0;
+	};
+	std::vector<Entry> entries;
+	float64 speed = 1.;
+};
+struct FingerprintBadge {
+	not_null<const FingerprintBadgeState*> state;
+	rpl::producer<> repaints;
+};
+FingerprintBadge SetupFingerprintBadge(
+	rpl::lifetime &on,
+	rpl::producer<QByteArray> fingerprint);
+
+void SetupFingerprintBadgeWidget(
+	not_null<Ui::RpWidget*> widget,
+	not_null<const FingerprintBadgeState*> state,
+	rpl::producer<> repaints);
+
+struct FingerprintBadgeCache {
+	struct Emoji {
+		EmojiPtr ptr = nullptr;
+		QImage image;
+	};
+	struct Entry {
+		std::vector<Emoji> emoji;
+	};
+	std::vector<Entry> entries;
+	QImage shadow;
+};
+void PaintFingerprintEntry(
+	QPainter &p,
+	const FingerprintBadgeState::Entry &entry,
+	FingerprintBadgeCache::Entry &cache,
+	int esize);
 
 } // namespace Calls

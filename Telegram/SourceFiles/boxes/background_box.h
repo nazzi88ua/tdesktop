@@ -1,42 +1,50 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "boxes/abstract_box.h"
+#include "ui/layers/box_content.h"
 
-namespace Ui {
-class RoundCheckbox;
-} // namespace Ui
+class PeerData;
 
-class BackgroundBox : public BoxContent {
+namespace Window {
+class SessionController;
+} // namespace Window
+
+namespace Data {
+class WallPaper;
+} // namespace Data
+
+class BackgroundBox : public Ui::BoxContent {
 public:
-	BackgroundBox(QWidget*);
+	BackgroundBox(
+		QWidget*,
+		not_null<Window::SessionController*> controller,
+		PeerData *forPeer = nullptr);
 
 protected:
 	void prepare() override;
 
 private:
-	void backgroundChosen(int index);
-
 	class Inner;
+
+	void chosen(const Data::WallPaper &paper);
+	[[nodiscard]] bool hasDefaultForPeer() const;
+	[[nodiscard]] bool chosenDefaultForPeer(
+		const Data::WallPaper &paper) const;
+	void removePaper(const Data::WallPaper &paper);
+	void resetForPeer();
+	[[nodiscard]] bool forChannel() const;
+
+	void chooseFromFile();
+
+	const not_null<Window::SessionController*> _controller;
+
 	QPointer<Inner> _inner;
+	PeerData *_forPeer = nullptr;
 
 };

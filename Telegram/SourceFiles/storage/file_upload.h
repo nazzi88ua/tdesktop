@@ -1,145 +1,192 @@
 /*
 This file is part of Telegram Desktop,
-the official desktop version of Telegram messaging app, see https://telegram.org
+the official desktop application for the Telegram messaging service.
 
-Telegram Desktop is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-It is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-
-In addition, as a special exception, the copyright holders give permission
-to link the code of portions of this program with the OpenSSL library.
-
-Full license: https://github.com/telegramdesktop/tdesktop/blob/master/LICENSE
-Copyright (c) 2014-2017 John Preston, https://desktop.telegram.org
+For license and copyright information please follow this link:
+https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "storage/localimageloader.h"
+#include "api/api_common.h"
+#include "base/timer.h"
+#include "base/weak_ptr.h"
+#include "mtproto/facade.h"
+
+class ApiWrap;
+struct FilePrepareResult;
+
+namespace Api {
+enum class SendProgressType;
+} // namespace Api
+
+namespace Main {
+class Session;
+} // namespace Main
 
 namespace Storage {
 
-class Uploader : public QObject, public RPCSender {
-	Q_OBJECT
+// MTP big files methods used for files greater than 30mb.
+constexpr auto kUseBigFilesFrom = 30 * 1024 * 1024;
 
+struct UploadedMedia {
+	uint64 id = 0;
+	FullMsgId fullId;
+	Api::RemoteFileInfo info;
+	Api::SendOptions options;
+	bool edit = false;
+};
+
+struct UploadSecureProgress {
+	FullMsgId fullId;
+	int64 offset = 0;
+	int64 size = 0;
+};
+
+struct UploadSecureDone {
+	FullMsgId fullId;
+	uint64 fileId = 0;
+	int partsCount = 0;
+};
+
+class Uploader final : public base::has_weak_ptr {
 public:
-	Uploader();
-	void uploadMedia(const FullMsgId &msgId, const SendMediaReady &image);
-	void upload(const FullMsgId &msgId, const FileLoadResultPtr &file);
-
-	int32 currentOffset(const FullMsgId &msgId) const; // -1 means file not found
-	int32 fullSize(const FullMsgId &msgId) const;
-
-	void cancel(const FullMsgId &msgId);
-	void pause(const FullMsgId &msgId);
-	void confirm(const FullMsgId &msgId);
-
-	void clear();
-
+	explicit Uploader(not_null<ApiWrap*> api);
 	~Uploader();
 
-public slots:
+	[[nodiscard]] Main::Session &session() const;
+	[[nodiscard]] FullMsgId currentUploadId() const;
+
+	void upload(
+		FullMsgId itemId,
+		const std::shared_ptr<FilePrepareResult> &file);
+
+	void pause(FullMsgId itemId);
+	void cancel(FullMsgId itemId);
+	void cancelAll();
+
+	[[nodiscard]] rpl::producer<UploadedMedia> photoReady() const {
+		return _photoReady.events();
+	}
+	[[nodiscard]] rpl::producer<UploadedMedia> documentReady() const {
+		return _documentReady.events();
+	}
+	[[nodiscard]] rpl::producer<UploadSecureDone> secureReady() const {
+		return _secureReady.events();
+	}
+	[[nodiscard]] rpl::producer<FullMsgId> photoProgress() const {
+		return _photoProgress.events();
+	}
+	[[nodiscard]] rpl::producer<FullMsgId> documentProgress() const {
+		return _documentProgress.events();
+	}
+	[[nodiscard]] auto secureProgress() const
+	-> rpl::producer<UploadSecureProgress> {
+		return _secureProgress.events();
+	}
+	[[nodiscard]] rpl::producer<FullMsgId> photoFailed() const {
+		return _photoFailed.events();
+	}
+	[[nodiscard]] rpl::producer<FullMsgId> documentFailed() const {
+		return _documentFailed.events();
+	}
+	[[nodiscard]] rpl::producer<FullMsgId> secureFailed() const {
+		return _secureFailed.events();
+	}
+
+	[[nodiscard]] rpl::producer<FullMsgId> nonPremiumDelays() const {
+		return _nonPremiumDelays.events();
+	}
+
 	void unpause();
-	void sendNext();
-	void killSessions();
-
-signals:
-	void photoReady(const FullMsgId &msgId, bool silent, const MTPInputFile &file);
-	void documentReady(const FullMsgId &msgId, bool silent, const MTPInputFile &file);
-	void thumbDocumentReady(const FullMsgId &msgId, bool silent, const MTPInputFile &file, const MTPInputFile &thumb);
-
-	void photoProgress(const FullMsgId &msgId);
-	void documentProgress(const FullMsgId &msgId);
-
-	void photoFailed(const FullMsgId &msgId);
-	void documentFailed(const FullMsgId &msgId);
+	void stopSessions();
 
 private:
-	struct File {
-		File(const SendMediaReady &media) : media(media), docSentParts(0) {
-			partsCount = media.parts.size();
-			if (type() == SendMediaType::File || type() == SendMediaType::Audio) {
-				setDocSize(media.file.isEmpty() ? media.data.size() : media.filesize);
-			} else {
-				docSize = docPartSize = docPartsCount = 0;
-			}
-		}
-		File(const FileLoadResultPtr &file) : file(file), docSentParts(0) {
-			partsCount = (type() == SendMediaType::Photo) ? file->fileparts.size() : file->thumbparts.size();
-			if (type() == SendMediaType::File || type() == SendMediaType::Audio) {
-				setDocSize(file->filesize);
-			} else {
-				docSize = docPartSize = docPartsCount = 0;
-			}
-		}
-		void setDocSize(int32 size) {
-			docSize = size;
-			if (docSize >= 1024 * 1024 || !setPartSize(DocumentUploadPartSize0)) {
-				if (docSize > 32 * 1024 * 1024 || !setPartSize(DocumentUploadPartSize1)) {
-					if (!setPartSize(DocumentUploadPartSize2)) {
-						if (!setPartSize(DocumentUploadPartSize3)) {
-							if (!setPartSize(DocumentUploadPartSize4)) {
-								LOG(("Upload Error: bad doc size: %1").arg(docSize));
-							}
-						}
-					}
-				}
-			}
-		}
-		bool setPartSize(uint32 partSize) {
-			docPartSize = partSize;
-			docPartsCount = (docSize / docPartSize) + ((docSize % docPartSize) ? 1 : 0);
-			return (docPartsCount <= DocumentMaxPartsCount);
-		}
+	struct Entry;
+	struct Request;
 
-		FileLoadResultPtr file;
-		SendMediaReady media;
-		int32 partsCount;
-		mutable int32 fileSentSize;
-
-		uint64 id() const {
-			return file ? file->id : media.id;
-		}
-		SendMediaType type() const {
-			return file ? file->type : media.type;
-		}
-		uint64 thumbId() const {
-			return file ? file->thumbId : media.thumbId;
-		}
-		const QString &filename() const {
-			return file ? file->filename : media.filename;
-		}
-
-		HashMd5 md5Hash;
-
-		QSharedPointer<QFile> docFile;
-		int32 docSentParts;
-		int32 docSize;
-		int32 docPartSize;
-		int32 docPartsCount;
+	enum class SendResult : uchar {
+		Success,
+		Failed,
+		DcIndexFull,
 	};
-	typedef QMap<FullMsgId, File> Queue;
+
+	void maybeSend();
+	[[nodiscard]] bool canAddDcIndex() const;
+	[[nodiscard]] std::optional<uchar> chooseDcIndexForNextRequest(
+		const base::flat_set<uchar> &used);
+	[[nodiscard]] Entry *chooseEntryForNextRequest();
+	[[nodiscard]] SendResult sendPart(not_null<Entry*> entry, uchar dcIndex);
+	[[nodiscard]] auto sendPendingPart(not_null<Entry*> entry, uchar dcIndex)
+		-> SendResult;
+	[[nodiscard]] auto sendDocPart(not_null<Entry*> entry, uchar dcIndex)
+		-> SendResult;
+	[[nodiscard]] auto sendSlicedPart(not_null<Entry*> entry, uchar dcIndex)
+		-> SendResult;
+	[[nodiscard]] QByteArray readDocPart(not_null<Entry*> entry);
+	void removeDcIndex();
+
+	template <typename Prepared>
+	void sendPreparedRequest(Prepared &&prepared, Request &&request);
+
+	void maybeFinishFront();
+	void finishFront();
 
 	void partLoaded(const MTPBool &result, mtpRequestId requestId);
-	bool partFailed(const RPCError &err, mtpRequestId requestId);
+	void partFailed(const MTP::Error &error, mtpRequestId requestId);
+	Request finishRequest(mtpRequestId requestId);
 
-	void currentFailed();
+	void uploadVideoCover(
+		UploadedMedia &&video,
+		std::shared_ptr<FilePrepareResult> videoCover);
+	void uploadCoverAsPhoto(FullMsgId videoId, UploadedMedia &&cover);
 
-	QMap<mtpRequestId, QByteArray> requestsSent;
-	QMap<mtpRequestId, int32> docRequestsSent;
-	QMap<mtpRequestId, int32> dcMap;
-	uint32 sentSize = 0;
-	uint32 sentSizes[MTP::kUploadSessionsCount] = { 0 };
+	void processPhotoProgress(FullMsgId itemId);
+	void processPhotoFailed(FullMsgId itemId);
+	void processDocumentProgress(FullMsgId itemId);
+	void processDocumentFailed(FullMsgId itemId);
 
-	FullMsgId uploading, _paused;
-	Queue queue;
-	Queue uploaded;
-	QTimer nextTimer, killSessionsTimer;
+	void notifyFailed(const Entry &entry);
+	void failed(FullMsgId itemId);
+	void cancelRequests(FullMsgId itemId);
+	void cancelAllRequests();
+	void clear();
+
+	void sendProgressUpdate(
+		not_null<HistoryItem*> item,
+		Api::SendProgressType type,
+		int progress = 0);
+
+	const not_null<ApiWrap*> _api;
+
+	std::vector<Entry> _queue;
+
+	base::flat_map<mtpRequestId, Request> _requests;
+	std::vector<int> _sentPerDcIndex;
+
+	// Fast requests since the latest dc index addition.
+	base::flat_set<uchar> _dcIndicesWithFastRequests;
+	crl::time _latestDcIndexAdded = 0;
+	crl::time _latestDcIndexRemoved = 0;
+	std::vector<Request> _pendingFromRemovedDcIndices;
+
+	base::flat_map<FullMsgId, FullMsgId> _videoIdToCoverId;
+	base::flat_map<FullMsgId, UploadedMedia> _videoWaitingCover;
+
+	FullMsgId _pausedId;
+	base::Timer _nextTimer, _stopSessionsTimer;
+
+	rpl::event_stream<UploadedMedia> _photoReady;
+	rpl::event_stream<UploadedMedia> _documentReady;
+	rpl::event_stream<UploadSecureDone> _secureReady;
+	rpl::event_stream<FullMsgId> _photoProgress;
+	rpl::event_stream<FullMsgId> _documentProgress;
+	rpl::event_stream<UploadSecureProgress> _secureProgress;
+	rpl::event_stream<FullMsgId> _photoFailed;
+	rpl::event_stream<FullMsgId> _documentFailed;
+	rpl::event_stream<FullMsgId> _secureFailed;
+	rpl::event_stream<FullMsgId> _nonPremiumDelays;
+
+	rpl::lifetime _lifetime;
 
 };
 
